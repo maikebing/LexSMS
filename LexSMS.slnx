@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/LexSMS/LexSMS.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/LexSMS.Tests/LexSMS.Tests.csproj" />
+  </Folder>
+</Solution>
