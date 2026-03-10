@@ -52,8 +52,39 @@ namespace LexSMS.Tests
         public void NetworkInfo_IsRegistered_ReturnsCorrectValue(
             NetworkRegistrationStatus status, bool expected)
         {
-            var network = new NetworkInfo { RegistrationStatus = status };
+            var network = new NetworkInfo { CsRegistrationStatus = status };
             Assert.Equal(expected, network.IsRegistered);
+        }
+
+        [Fact]
+        public void NetworkInfo_RegistrationStatus_PrioritizesEpsOverGprsOverCs()
+        {
+            // EPS 优先级最高
+            var network1 = new NetworkInfo
+            {
+                CsRegistrationStatus = NetworkRegistrationStatus.RegisteredHome,
+                GprsRegistrationStatus = NetworkRegistrationStatus.RegisteredHome,
+                EpsRegistrationStatus = NetworkRegistrationStatus.RegisteredRoaming
+            };
+            Assert.Equal(NetworkRegistrationStatus.RegisteredRoaming, network1.RegistrationStatus);
+
+            // GPRS 次之
+            var network2 = new NetworkInfo
+            {
+                CsRegistrationStatus = NetworkRegistrationStatus.RegisteredHome,
+                GprsRegistrationStatus = NetworkRegistrationStatus.RegisteredRoaming,
+                EpsRegistrationStatus = NetworkRegistrationStatus.NotRegistered
+            };
+            Assert.Equal(NetworkRegistrationStatus.RegisteredRoaming, network2.RegistrationStatus);
+
+            // CS 最后
+            var network3 = new NetworkInfo
+            {
+                CsRegistrationStatus = NetworkRegistrationStatus.RegisteredHome,
+                GprsRegistrationStatus = NetworkRegistrationStatus.NotRegistered,
+                EpsRegistrationStatus = NetworkRegistrationStatus.Unknown
+            };
+            Assert.Equal(NetworkRegistrationStatus.RegisteredHome, network3.RegistrationStatus);
         }
 
         #endregion

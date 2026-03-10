@@ -16,6 +16,11 @@ namespace LexSMS.Models
         public int Ber { get; set; }
 
         /// <summary>
+        /// 错误消息（查询失败时）
+        /// </summary>
+        public string? ErrorMessage { get; set; }
+
+        /// <summary>
         /// 信号强度（dBm）
         /// </summary>
         public int RssiDbm => Rssi == 99 ? -999 : -113 + Rssi * 2;
@@ -43,9 +48,63 @@ namespace LexSMS.Models
     public class NetworkInfo
     {
         /// <summary>
-        /// 网络注册状态
+        /// CS 域网络注册状态（用于语音和短信）- AT+CREG
         /// </summary>
-        public NetworkRegistrationStatus RegistrationStatus { get; set; }
+        public NetworkRegistrationStatus CsRegistrationStatus { get; set; } = NetworkRegistrationStatus.Unknown;
+
+        /// <summary>
+        /// GPRS/PS 域网络注册状态（用于 GPRS 数据）- AT+CGREG
+        /// </summary>
+        public NetworkRegistrationStatus GprsRegistrationStatus { get; set; } = NetworkRegistrationStatus.Unknown;
+
+        /// <summary>
+        /// EPS/LTE 域网络注册状态（用于 4G 数据）- AT+CEREG
+        /// </summary>
+        public NetworkRegistrationStatus EpsRegistrationStatus { get; set; } = NetworkRegistrationStatus.Unknown;
+
+        /// <summary>
+        /// 综合网络注册状态（优先级：EPS > GPRS > CS）
+        /// </summary>
+        public NetworkRegistrationStatus RegistrationStatus
+        {
+            get
+            {
+                // 优先使用 EPS（4G），其次 GPRS（3G），最后 CS（2G）
+                if (EpsRegistrationStatus == NetworkRegistrationStatus.RegisteredHome ||
+                    EpsRegistrationStatus == NetworkRegistrationStatus.RegisteredRoaming)
+                    return EpsRegistrationStatus;
+
+                if (GprsRegistrationStatus == NetworkRegistrationStatus.RegisteredHome ||
+                    GprsRegistrationStatus == NetworkRegistrationStatus.RegisteredRoaming)
+                    return GprsRegistrationStatus;
+
+                if (CsRegistrationStatus == NetworkRegistrationStatus.RegisteredHome ||
+                    CsRegistrationStatus == NetworkRegistrationStatus.RegisteredRoaming)
+                    return CsRegistrationStatus;
+
+                // 如果都未注册，优先返回搜索状态
+                if (EpsRegistrationStatus == NetworkRegistrationStatus.Searching ||
+                    GprsRegistrationStatus == NetworkRegistrationStatus.Searching ||
+                    CsRegistrationStatus == NetworkRegistrationStatus.Searching)
+                    return NetworkRegistrationStatus.Searching;
+
+                // 如果有拒绝状态，返回拒绝
+                if (EpsRegistrationStatus == NetworkRegistrationStatus.RegistrationDenied ||
+                    GprsRegistrationStatus == NetworkRegistrationStatus.RegistrationDenied ||
+                    CsRegistrationStatus == NetworkRegistrationStatus.RegistrationDenied)
+                    return NetworkRegistrationStatus.RegistrationDenied;
+
+                // 返回最有价值的状态
+                if (EpsRegistrationStatus != NetworkRegistrationStatus.Unknown)
+                    return EpsRegistrationStatus;
+                if (GprsRegistrationStatus != NetworkRegistrationStatus.Unknown)
+                    return GprsRegistrationStatus;
+                if (CsRegistrationStatus != NetworkRegistrationStatus.Unknown)
+                    return CsRegistrationStatus;
+
+                return NetworkRegistrationStatus.Unknown;
+            }
+        }
 
         /// <summary>
         /// 运营商名称
@@ -58,11 +117,39 @@ namespace LexSMS.Models
         public NetworkAccessType AccessType { get; set; }
 
         /// <summary>
-        /// 是否已注册网络
+        /// GPRS/PS 域附着状态（用于数据连接）
+        /// </summary>
+        public GprsAttachStatus GprsAttachStatus { get; set; } = GprsAttachStatus.Unknown;
+
+        /// <summary>
+        /// 是否已注册网络（任意域已注册即可）
         /// </summary>
         public bool IsRegistered =>
             RegistrationStatus == NetworkRegistrationStatus.RegisteredHome ||
             RegistrationStatus == NetworkRegistrationStatus.RegisteredRoaming;
+
+        /// <summary>
+        /// 是否已附着到 PS 域（可以进行数据通信）
+        /// </summary>
+        public bool IsAttached => GprsAttachStatus == GprsAttachStatus.Attached;
+
+        /// <summary>
+        /// 错误消息（查询失败时）
+        /// </summary>
+        public string? ErrorMessage { get; set; }
+    }
+
+    /// <summary>
+    /// GPRS/PS 域附着状态枚举
+    /// </summary>
+    public enum GprsAttachStatus
+    {
+        /// <summary>未知状态</summary>
+        Unknown = -1,
+        /// <summary>未附着（不能进行数据通信）</summary>
+        Detached = 0,
+        /// <summary>已附着（可以进行数据通信）</summary>
+        Attached = 1
     }
 
     /// <summary>

@@ -2,6 +2,7 @@ using System;
 using System.Threading.Tasks;
 using LexSMS.Core;
 using LexSMS.Events;
+using LexSMS.Exceptions;
 using LexSMS.Features;
 using LexSMS.Models;
 
@@ -21,6 +22,16 @@ namespace LexSMS
         private readonly LocationManager _locationManager;
         private readonly StatusManager _statusManager;
         private bool _disposed;
+
+        /// <summary>
+        /// 日志输出委托
+        /// </summary>
+        public Action<string>? LogOutput { get; set; }
+
+        /// <summary>
+        /// 是否启用详细日志（包括调试信息）
+        /// </summary>
+        public bool EnableVerboseLogging { get; set; } = true;
 
         #region 事件
 
@@ -114,13 +125,221 @@ namespace LexSMS
         /// </summary>
         public async Task OpenAsync()
         {
+            Log("正在打开串口连接...");
             _channel.Open();
-            await Task.Delay(500); // 等待模块就绪
+            Log("串口连接成功，等待模块就绪...");
+            await Task.Delay(500);
+
+            // 测试模块响应
+            LogDebug("正在测试模块响应...");
+            var ping = await _statusManager.PingAsync();
+            if (!ping)
+            {
+                LogWarning("模块未响应AT命令");
+            }
+            else
+            {
+                LogDebug("模块响应正常");
+            }
+
+            // 获取并输出模块信息
+            try
+            {
+                LogDebug("正在获取模块信息...");
+                var moduleInfo = await _statusManager.GetModuleInfoAsync();
+
+                if (moduleInfo.ErrorMessage != null)
+                {
+                    LogError($"获取模块信息失败: {moduleInfo.ErrorMessage}");
+                }
+                else
+                {
+                    Log($"模块制造商: {moduleInfo.Manufacturer}");
+                    Log($"模块型号: {moduleInfo.Model}");
+                    Log($"固件版本: {moduleInfo.FirmwareVersion}");
+                    Log($"IMEI: {moduleInfo.Imei}");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogError($"获取模块信息失败: {ex.Message}");
+            }
+
+            // 获取并输出SIM卡信息
+            try
+            {
+                LogDebug("正在获取SIM卡信息...");
+                var simInfo = await _statusManager.GetSimInfoAsync();
+
+                if (simInfo.ErrorMessage != null)
+                {
+                    LogError($"获取SIM卡信息失败: {simInfo.ErrorMessage}");
+                    Log($"SIM卡状态: {simInfo.Status}");
+                }
+                else
+                {
+                    Log($"SIM卡状态: {simInfo.Status}");
+                    Log($"IMSI: {simInfo.Imsi}");
+                    Log($"ICCID: {simInfo.Iccid}");
+                    var phoneNumber = simInfo.PhoneNumber ?? "未知";
+                    Log($"电话号码: {phoneNumber}");
+
+                    if (simInfo.Status != SimStatus.Ready)
+                    {
+                        LogWarning($"SIM卡未就绪，当前状态: {simInfo.Status}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogError($"获取SIM卡信息失败: {ex.Message}");
+            }
+
+            // 检查网络注册状态
+            Log("正在检查网络注册状态...");
+            NetworkInfo? networkInfo = null;
+            int retryCount = 0;
+            const int maxRetries = 20;
+            string? lastErrorMessage = null;
+
+            while (retryCount < maxRetries)
+            {
+                try
+                {
+                    networkInfo = await _statusManager.GetNetworkInfoAsync();
+
+                    if (networkInfo.ErrorMessage != null)
+                    {
+                        lastErrorMessage = networkInfo.ErrorMessage;
+                        LogWarning($"获取网络信息失败: {networkInfo.ErrorMessage}");
+                    }
+                    else
+                    {
+                        lastErrorMessage = null;
+                        LogDebug($"网络注册状态: {networkInfo.RegistrationStatus}");
+                        var operatorName = networkInfo.OperatorName ?? "未知";
+                        Log($"运营商: {operatorName}");
+                        Log($"网络类型: {networkInfo.AccessType}");
+
+                        if (networkInfo.IsRegistered)
+                        {
+                            Log("网络注册成功");
+                            break;
+                        }
+                        else if (networkInfo.RegistrationStatus == NetworkRegistrationStatus.RegistrationDenied)
+                        {
+                            LogError("网络注册被拒绝");
+                            throw new ModemException("网络注册被拒绝，请检查SIM卡和网络设置");
+                        }
+                        else if (networkInfo.RegistrationStatus == NetworkRegistrationStatus.Searching)
+                        {
+                            LogDebug($"正在搜索网络... ({retryCount + 1}/{maxRetries})");
+                        }
+                        else
+                        {
+                            LogDebug($"网络未注册，等待重试... ({retryCount + 1}/{maxRetries})");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogWarning($"获取网络信息失败: {ex.Message}");
+                    lastErrorMessage = ex.Message;
+                }
+
+                retryCount++;
+                await Task.Delay(1000);
+            }
+
+            if (networkInfo == null || !networkInfo.IsRegistered)
+            {
+                LogError("超过最大重试次数，网络注册失败");
+                string errorDetail = lastErrorMessage != null 
+                    ? $"无法注册到网络，请检查SIM卡和信号强度。详细错误: {lastErrorMessage}"
+                    : "无法注册到网络，请检查SIM卡和信号强度";
+                throw new ModemException(errorDetail);
+            }
+
+            // 获取并输出信号强度
+            try
+            {
+                LogDebug("正在获取信号强度...");
+                var signalInfo = await _statusManager.GetSignalInfoAsync();
+
+                if (signalInfo.ErrorMessage != null)
+                {
+                    LogWarning($"获取信号强度失败: {signalInfo.ErrorMessage}");
+                }
+                else
+                {
+                    Log($"信号强度: {signalInfo.RssiDbm} dBm (RSSI: {signalInfo.Rssi}, 等级: {signalInfo.SignalLevel})");
+                    LogDebug($"误码率: {signalInfo.Ber}");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogWarning($"获取信号强度失败: {ex.Message}");
+            }
 
             // 初始化基本设置
-            await _statusManager.PingAsync();
+            LogDebug("正在初始化通话管理器...");
             await _callManager.InitializeAsync();
+            LogDebug("通话管理器初始化完成");
+
+            LogDebug("正在初始化短信管理器...");
             await _smsManager.InitializeAsync();
+            LogDebug("短信管理器初始化完成");
+
+            Log("模块初始化完成，准备就绪");
+        }
+
+        /// <summary>
+        /// 输出日志
+        /// </summary>
+        private void Log(string message, LogLevel level = LogLevel.Info)
+        {
+            if (LogOutput == null) return;
+
+            var levelStr = level switch
+            {
+                LogLevel.Debug => "DEBUG",
+                LogLevel.Info => "INFO ",
+                LogLevel.Warning => "WARN ",
+                LogLevel.Error => "ERROR",
+                _ => "INFO "
+            };
+
+            // 如果未启用详细日志，跳过调试级别的消息
+            if (!EnableVerboseLogging && level == LogLevel.Debug)
+                return;
+
+            LogOutput?.Invoke($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [{levelStr}] {message}");
+        }
+
+        /// <summary>
+        /// 输出调试日志
+        /// </summary>
+        private void LogDebug(string message) => Log(message, LogLevel.Debug);
+
+        /// <summary>
+        /// 输出警告日志
+        /// </summary>
+        private void LogWarning(string message) => Log(message, LogLevel.Warning);
+
+        /// <summary>
+        /// 输出错误日志
+        /// </summary>
+        private void LogError(string message) => Log(message, LogLevel.Error);
+
+        /// <summary>
+        /// 日志级别枚举
+        /// </summary>
+        private enum LogLevel
+        {
+            Debug,
+            Info,
+            Warning,
+            Error
         }
 
         /// <summary>
@@ -337,10 +556,31 @@ namespace LexSMS
             => _statusManager.PingAsync();
 
         /// <summary>
+        /// 查询 GPRS/PS 域附着状态
+        /// </summary>
+        public Task<GprsAttachStatus> GetGprsAttachStatusAsync()
+            => _statusManager.GetGprsAttachStatusAsync();
+
+        /// <summary>
+        /// 设置 GPRS/PS 域附着状态
+        /// </summary>
+        /// <param name="attach">true=附着，false=分离</param>
+        public Task<bool> SetGprsAttachAsync(bool attach)
+            => _statusManager.SetGprsAttachAsync(attach);
+
+        /// <summary>
         /// 重置模块
         /// </summary>
         public Task ResetAsync()
             => _statusManager.ResetAsync();
+
+        /// <summary>
+        /// 发送原始 AT 命令（用于调试和高级功能）
+        /// </summary>
+        /// <param name="command">AT 命令</param>
+        /// <param name="timeoutMs">超时时间（毫秒），0 使用默认值</param>
+        public Task<AtResponse> SendRawCommandAsync(string command, int timeoutMs = 0)
+            => _channel.SendCommandAsync(command, timeoutMs);
 
         #endregion
 

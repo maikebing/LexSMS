@@ -86,7 +86,7 @@ namespace LexSMS.Core
                 _currentResponseLines.Clear();
                 _pendingResponse = new TaskCompletionSource<AtResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-                string cmdToSend = command.EndsWith("\r") ? command : command + "\r";
+                string cmdToSend = command.EndsWith("\r\n") ? command : command + "\r\n";
                 byte[] bytes = Encoding.ASCII.GetBytes(cmdToSend);
                 _serialPort.Write(bytes, 0, bytes.Length);
 
@@ -240,6 +240,7 @@ namespace LexSMS.Core
                     line.StartsWith("+CMS ERROR:", StringComparison.OrdinalIgnoreCase))
                 {
                     response.IsError = true;
+                    response.ErrorMessage = line;
                     break;
                 }
             }

@@ -1,6 +1,11 @@
 <Solution>
   <Folder Name="/samples/">
+    <Project Path="samples/DiagnosticExample/DiagnosticExample.csproj" />
+    <Project Path="samples/GprsAttachExample/GprsAttachExample.csproj" />
+    <Project Path="samples/NetworkDebugExample/NetworkDebugExample.csproj" />
+    <Project Path="samples/ReceiveSmsExample/ReceiveSmsExample.csproj" />
     <Project Path="samples/SendSmsExample/SendSmsExample.csproj" />
+    <Project Path="samples/StatusCheckExample/StatusCheckExample.csproj" />
   </Folder>
   <Folder Name="/src/">
     <Project Path="src/LexSMS/LexSMS.csproj" />

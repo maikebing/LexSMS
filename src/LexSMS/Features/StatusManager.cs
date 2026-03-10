@@ -30,21 +30,29 @@ namespace LexSMS.Features
             var mfgResp = await _channel.SendCommandAsync("AT+CGMI");
             if (mfgResp.IsOk)
                 info.Manufacturer = mfgResp.FirstLine?.Trim();
+            else if (mfgResp.IsError)
+                info.ErrorMessage = mfgResp.ErrorMessage;
 
             // 型号
             var modelResp = await _channel.SendCommandAsync("AT+CGMM");
             if (modelResp.IsOk)
                 info.Model = modelResp.FirstLine?.Trim();
+            else if (modelResp.IsError && info.ErrorMessage == null)
+                info.ErrorMessage = modelResp.ErrorMessage;
 
             // 固件版本
             var fwResp = await _channel.SendCommandAsync("AT+CGMR");
             if (fwResp.IsOk)
                 info.FirmwareVersion = fwResp.FirstLine?.Trim();
+            else if (fwResp.IsError && info.ErrorMessage == null)
+                info.ErrorMessage = fwResp.ErrorMessage;
 
             // IMEI
             var imeiResp = await _channel.SendCommandAsync("AT+CGSN");
             if (imeiResp.IsOk)
                 info.Imei = imeiResp.FirstLine?.Trim();
+            else if (imeiResp.IsError && info.ErrorMessage == null)
+                info.ErrorMessage = imeiResp.ErrorMessage;
 
             // 电池状态
             var battResp = await _channel.SendCommandAsync("AT+CBC");
@@ -65,8 +73,13 @@ namespace LexSMS.Features
                     }
                 }
             }
+            else if (battResp.IsError && info.ErrorMessage == null)
+            {
+                info.ErrorMessage = battResp.ErrorMessage;
+            }
 
-            info.Status = ModuleStatus.Ready;
+            // 根据是否有错误消息设置状态
+            info.Status = info.ErrorMessage != null ? ModuleStatus.Error : ModuleStatus.Ready;
             return info;
         }
 
@@ -97,6 +110,12 @@ namespace LexSMS.Features
                         break;
                     }
                 }
+            }
+            else if (pinResp.IsError)
+            {
+                // SIM卡错误（如未插入）
+                info.Status = SimStatus.Absent;
+                info.ErrorMessage = pinResp.ErrorMessage;
             }
             else
             {
@@ -157,6 +176,12 @@ namespace LexSMS.Features
             var info = new SignalInfo { Rssi = 99, Ber = 99 };
 
             var resp = await _channel.SendCommandAsync("AT+CSQ");
+            if (resp.IsError)
+            {
+                info.ErrorMessage = resp.ErrorMessage;
+                return info;
+            }
+
             if (!resp.IsOk) return info;
 
             foreach (var line in resp.Lines)
@@ -184,25 +209,81 @@ namespace LexSMS.Features
         {
             var info = new NetworkInfo();
 
-            // 网络注册状态
-            var regResp = await _channel.SendCommandAsync("AT+CREG?");
-            if (regResp.IsOk)
+            // CS 域网络注册状态 (AT+CREG) - 用于语音和短信
+            var cregResp = await _channel.SendCommandAsync("AT+CREG?");
+            if (cregResp.IsOk)
             {
-                foreach (var line in regResp.Lines)
+                foreach (var line in cregResp.Lines)
                 {
+                    // 响应格式：+CREG: <n>,<stat>[,<lac>,<ci>]
+                    // 或：+CREG: <stat>
                     if (line.StartsWith("+CREG:", StringComparison.OrdinalIgnoreCase))
                     {
                         string data = line.Substring(6).Trim();
                         string[] parts = data.Split(',');
                         int statPart = parts.Length >= 2 ? 1 : 0;
+
                         if (int.TryParse(parts[statPart].Trim(), out int stat))
                         {
-                            info.RegistrationStatus = (NetworkRegistrationStatus)stat;
+                            info.CsRegistrationStatus = (NetworkRegistrationStatus)stat;
                         }
                         break;
                     }
                 }
             }
+            else if (cregResp.IsError)
+            {
+                info.ErrorMessage = cregResp.ErrorMessage;
+            }
+
+            // GPRS/PS 域网络注册状态 (AT+CGREG) - 用于 GPRS 数据
+            var cgregResp = await _channel.SendCommandAsync("AT+CGREG?");
+            if (cgregResp.IsOk)
+            {
+                foreach (var line in cgregResp.Lines)
+                {
+                    // 响应格式：+CGREG: <n>,<stat>[,<lac>,<ci>,<AcT>]
+                    if (line.StartsWith("+CGREG:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string data = line.Substring(7).Trim();
+                        string[] parts = data.Split(',');
+                        int statPart = parts.Length >= 2 ? 1 : 0;
+
+                        if (int.TryParse(parts[statPart].Trim(), out int stat))
+                        {
+                            info.GprsRegistrationStatus = (NetworkRegistrationStatus)stat;
+                        }
+                        break;
+                    }
+                }
+            }
+            else if (cgregResp.IsError && info.ErrorMessage == null)
+            {
+                info.ErrorMessage = cgregResp.ErrorMessage;
+            }
+
+            // EPS/LTE 域网络注册状态 (AT+CEREG) - 用于 4G/LTE 数据
+            var ceregResp = await _channel.SendCommandAsync("AT+CEREG?");
+            if (ceregResp.IsOk)
+            {
+                foreach (var line in ceregResp.Lines)
+                {
+                    // 响应格式：+CEREG: <n>,<stat>[,<tac>,<ci>,<AcT>]
+                    if (line.StartsWith("+CEREG:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string data = line.Substring(7).Trim();
+                        string[] parts = data.Split(',');
+                        int statPart = parts.Length >= 2 ? 1 : 0;
+
+                        if (int.TryParse(parts[statPart].Trim(), out int stat))
+                        {
+                            info.EpsRegistrationStatus = (NetworkRegistrationStatus)stat;
+                        }
+                        break;
+                    }
+                }
+            }
+            // CEREG 可能不被所有模块支持，所以不记录错误
 
             // 运营商信息
             var opsResp = await _channel.SendCommandAsync("AT+COPS?");
@@ -239,6 +320,32 @@ namespace LexSMS.Features
                     }
                 }
             }
+            else if (opsResp.IsError && info.ErrorMessage == null)
+            {
+                info.ErrorMessage = opsResp.ErrorMessage;
+            }
+
+            // GPRS 附着状态
+            var attachResp = await _channel.SendCommandAsync("AT+CGATT?");
+            if (attachResp.IsOk)
+            {
+                foreach (var line in attachResp.Lines)
+                {
+                    if (line.StartsWith("+CGATT:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string data = line.Substring(7).Trim();
+                        if (int.TryParse(data, out int state))
+                        {
+                            info.GprsAttachStatus = (GprsAttachStatus)state;
+                        }
+                        break;
+                    }
+                }
+            }
+            else if (attachResp.IsError && info.ErrorMessage == null)
+            {
+                info.ErrorMessage = attachResp.ErrorMessage;
+            }
 
             return info;
         }
@@ -250,6 +357,40 @@ namespace LexSMS.Features
         {
             var resp = await _channel.SendCommandAsync("AT", 3000);
             return resp.IsOk;
+        }
+
+        /// <summary>
+        /// 设置 GPRS/PS 域附着状态
+        /// </summary>
+        /// <param name="attach">true=附着，false=分离</param>
+        public async Task<bool> SetGprsAttachAsync(bool attach)
+        {
+            int state = attach ? 1 : 0;
+            var resp = await _channel.SendCommandAsync($"AT+CGATT={state}", 75000); // GPRS 附着可能需要较长时间
+            return resp.IsOk;
+        }
+
+        /// <summary>
+        /// 查询 GPRS/PS 域附着状态
+        /// </summary>
+        public async Task<GprsAttachStatus> GetGprsAttachStatusAsync()
+        {
+            var resp = await _channel.SendCommandAsync("AT+CGATT?");
+            if (!resp.IsOk) return GprsAttachStatus.Unknown;
+
+            foreach (var line in resp.Lines)
+            {
+                if (line.StartsWith("+CGATT:", StringComparison.OrdinalIgnoreCase))
+                {
+                    string data = line.Substring(7).Trim();
+                    if (int.TryParse(data, out int state))
+                    {
+                        return (GprsAttachStatus)state;
+                    }
+                }
+            }
+
+            return GprsAttachStatus.Unknown;
         }
 
         /// <summary>

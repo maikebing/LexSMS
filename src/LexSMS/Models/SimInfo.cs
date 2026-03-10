@@ -24,6 +24,11 @@ namespace LexSMS.Models
         /// 电话号码 (MSISDN)
         /// </summary>
         public string? PhoneNumber { get; set; }
+
+        /// <summary>
+        /// 错误消息（查询失败时）
+        /// </summary>
+        public string? ErrorMessage { get; set; }
     }
 
     /// <summary>

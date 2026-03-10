@@ -39,6 +39,11 @@ namespace LexSMS.Models
         /// 电池电量百分比，-1 表示未知或无电池
         /// </summary>
         public int BatteryPercent { get; set; } = -1;
+
+        /// <summary>
+        /// 错误消息（查询失败时）
+        /// </summary>
+        public string? ErrorMessage { get; set; }
     }
 
     /// <summary>

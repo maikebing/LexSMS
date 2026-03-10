@@ -28,7 +28,12 @@ namespace LexSMS.Core
         public string RawResponse { get; set; } = string.Empty;
 
         /// <summary>
-        /// 获取第一个有内容的响应行（排除 OK/ERROR）
+        /// 错误消息（当 IsError 为 true 时）
+        /// </summary>
+        public string? ErrorMessage { get; set; }
+
+        /// <summary>
+        /// 获取第一个有内容的响应行（排除命令回显、OK/ERROR）
         /// </summary>
         public string? FirstLine
         {
@@ -37,6 +42,7 @@ namespace LexSMS.Core
                 foreach (var line in Lines)
                 {
                     if (!string.IsNullOrWhiteSpace(line) &&
+                        !line.StartsWith("AT", System.StringComparison.OrdinalIgnoreCase) &&
                         line != "OK" &&
                         line != "ERROR" &&
                         !line.StartsWith("+CME ERROR") &&

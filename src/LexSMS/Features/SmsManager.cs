@@ -17,6 +17,7 @@ namespace LexSMS.Features
     public class SmsManager
     {
         private readonly AtChannel _channel;
+        private string? _pendingCmtHeader;  // 缓存 +CMT 头部，等待下一行 PDU
 
         /// <summary>
         /// 收到新短信事件
@@ -39,13 +40,18 @@ namespace LexSMS.Features
             if (!resp.IsOk)
                 throw new AtCommandErrorException("AT+CMGF=0", resp.RawResponse);
 
-            // 启用新短信主动上报，并将短信存储到SIM卡
-            // AT+CNMI=2,1,0,0,0: 直接推送消息存储通知
-            resp = await _channel.SendCommandAsync("AT+CNMI=2,1,0,0,0");
+            // 启用新短信主动上报，直接推送到 TE，不存储到 SIM 卡
+            // AT+CNMI=2,2,0,0,0:
+            //   mode=2: 启用主动上报
+            //   mt=2: 新短信直接上报内容 (+CMT)，不存储到 SIM 卡
+            //   bm=0: 小区广播不上报
+            //   ds=0: 状态报告不存储
+            //   bfr=0: 缓冲区清除
+            resp = await _channel.SendCommandAsync("AT+CNMI=2,2,0,0,0");
             if (!resp.IsOk)
-                throw new AtCommandErrorException("AT+CNMI=2,1,0,0,0", resp.RawResponse);
+                throw new AtCommandErrorException("AT+CNMI=2,2,0,0,0", resp.RawResponse);
 
-            // 选择短信存储: SIM卡
+            // 选择短信存储: SIM卡（用于手动读取已存在的短信）
             await _channel.SendCommandAsync("AT+CPMS=\"SM\",\"SM\",\"SM\"");
         }
 
@@ -67,10 +73,10 @@ namespace LexSMS.Features
 
             var (pdu, tpduLength) = PduHelper.BuildSmsPdu(phoneNumber, message);
 
-            // 发送AT+CMGS命令
+            // 发送AT+CMGS命令并等待 > 提示符
             var promptResp = await _channel.SendCommandAsync($"AT+CMGS={tpduLength}", 10000);
 
-            // 等待 > 提示符
+            // 检查是否收到 > 提示符
             if (!promptResp.RawResponse.Contains(">"))
             {
                 if (promptResp.IsError)
@@ -78,16 +84,91 @@ namespace LexSMS.Features
                 throw new ModemException("未收到短信输入提示符");
             }
 
-            // 发送PDU数据 + Ctrl+Z
-            _channel.SendRaw(pdu);
-            _channel.SendCtrlZ();
+            // 发送PDU数据并等待完成
+            // 注意：发送 PDU + Ctrl+Z 后，模块会返回 +CMGS: <mr> 和 OK
+            await SendPduWithCtrlZAsync(pdu);
+        }
 
-            // 等待响应（短信发送可能需要30秒）
-            await Task.Delay(500);
-            var sendResp = await _channel.SendCommandAsync("", 30000);
+        /// <summary>
+        /// 发送 PDU 数据和 Ctrl+Z，并等待发送完成
+        /// </summary>
+        private async Task SendPduWithCtrlZAsync(string pdu)
+        {
+            // 准备一个 TaskCompletionSource 来等待发送结果
+            var tcs = new TaskCompletionSource<AtResponse>();
+            var responseLines = new List<string>();
+            var startTime = DateTime.Now;
+            var timeout = TimeSpan.FromSeconds(60); // 短信发送最多等待 60 秒
 
-            if (sendResp.IsError)
-                throw new AtCommandErrorException("SMS Send", sendResp.RawResponse);
+            // 临时订阅 URC 来捕获响应
+            void tempHandler(object? sender, string urc)
+            {
+                responseLines.Add(urc);
+
+                // 检查是否收到成功响应
+                if (urc == "OK" || urc.StartsWith("+CMGS:", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (urc == "OK")
+                    {
+                        // 收到 OK，短信发送成功
+                        var response = new AtResponse
+                        {
+                            IsOk = true,
+                            Lines = new List<string>(responseLines),
+                            RawResponse = string.Join("\r\n", responseLines)
+                        };
+                        tcs.TrySetResult(response);
+                    }
+                }
+                // 检查是否有错误
+                else if (urc == "ERROR" || 
+                         urc.StartsWith("+CMS ERROR:", StringComparison.OrdinalIgnoreCase) ||
+                         urc.StartsWith("+CME ERROR:", StringComparison.OrdinalIgnoreCase))
+                {
+                    responseLines.Add(urc);
+                    var response = new AtResponse
+                    {
+                        IsError = true,
+                        ErrorMessage = urc,
+                        Lines = new List<string>(responseLines),
+                        RawResponse = string.Join("\r\n", responseLines)
+                    };
+                    tcs.TrySetResult(response);
+                }
+            }
+
+            _channel.UnsolicitedReceived += tempHandler;
+
+            try
+            {
+                // 发送 PDU + Ctrl+Z
+                _channel.SendRaw(pdu);
+                await Task.Delay(100); // 短暂延迟确保数据发送
+                _channel.SendCtrlZ();
+
+                // 等待响应或超时
+                var completedTask = await Task.WhenAny(
+                    tcs.Task,
+                    Task.Delay(timeout)
+                );
+
+                if (completedTask != tcs.Task)
+                {
+                    // 超时
+                    throw new TimeoutException($"短信发送超时（{timeout.TotalSeconds}秒）。注意：短信可能已发送成功但响应超时。");
+                }
+
+                var result = await tcs.Task;
+
+                if (result.IsError)
+                {
+                    throw new AtCommandErrorException("SMS Send", result.ErrorMessage ?? result.RawResponse);
+                }
+            }
+            finally
+            {
+                _channel.UnsolicitedReceived -= tempHandler;
+            }
         }
 
         /// <summary>
@@ -251,7 +332,38 @@ namespace LexSMS.Features
 
         private void OnUnsolicitedReceived(object? sender, string urc)
         {
-            // 新短信通知: +CMTI: "SM",<index>
+            // 如果上一次收到了 +CMT 头部，这次应该是 PDU 数据
+            if (_pendingCmtHeader != null)
+            {
+                try
+                {
+                    // 解析 PDU
+                    var (phoneNumber, message, timestamp) = PduHelper.DecodePdu(urc);
+
+                    // 触发事件，传递完整的短信信息
+                    var smsMessage = new SmsMessage
+                    {
+                        Index = -1,  // 直接推送的短信没有索引
+                        PhoneNumber = phoneNumber,
+                        Content = message,
+                        Timestamp = timestamp,
+                        Status = SmsStatus.ReceivedUnread
+                    };
+
+                    SmsReceived?.Invoke(this, new SmsReceivedEventArgs(-1, smsMessage));
+                }
+                catch (Exception)
+                {
+                    // PDU 解析失败，忽略
+                }
+                finally
+                {
+                    _pendingCmtHeader = null;
+                }
+                return;
+            }
+
+            // 新短信通知（存储索引）: +CMTI: "SM",<index>
             if (urc.StartsWith("+CMTI:", StringComparison.OrdinalIgnoreCase))
             {
                 string data = urc.Substring(6).Trim();
@@ -261,10 +373,11 @@ namespace LexSMS.Features
                     SmsReceived?.Invoke(this, new SmsReceivedEventArgs(idx));
                 }
             }
-            // 直接推送短信内容: +CMT: ...
+            // 直接推送短信内容头部: +CMT: [<alpha>],<length>
+            // 下一行将是 PDU 数据
             else if (urc.StartsWith("+CMT:", StringComparison.OrdinalIgnoreCase))
             {
-                SmsReceived?.Invoke(this, new SmsReceivedEventArgs(-1));
+                _pendingCmtHeader = urc;
             }
         }
     }

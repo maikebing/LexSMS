@@ -15,7 +15,10 @@ class Program
         
         // 创建A76XX模块实例
         using var modem = new A76XXModem(portName, 115200);
-        
+        modem.LogOutput = (message) =>
+        {
+            Console.WriteLine(message);
+        };
         try
         {
             Console.WriteLine("正在打开串口并初始化模块...");
