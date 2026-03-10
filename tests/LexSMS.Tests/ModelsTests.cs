@@ -141,6 +141,25 @@ namespace LexSMS.Tests
             Assert.Equal(expected, response.IsSuccess);
         }
 
+        [Fact]
+        public void HttpResponse_Headers_IsNullByDefault()
+        {
+            var response = new HttpResponse { StatusCode = 200 };
+            Assert.Null(response.Headers);
+        }
+
+        [Fact]
+        public void HttpResponse_Headers_StoresHeaderContent()
+        {
+            var response = new HttpResponse
+            {
+                StatusCode = 200,
+                Headers = "Content-Type: application/json\r\nContent-Length: 42"
+            };
+            Assert.NotNull(response.Headers);
+            Assert.Contains("Content-Type", response.Headers);
+        }
+
         #endregion
 
         #region SerialPortConfig 测试

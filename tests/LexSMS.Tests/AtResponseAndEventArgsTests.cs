@@ -164,5 +164,32 @@ namespace LexSMS.Tests
             Assert.False(args.IsConnected);
             Assert.Equal("网络断开", args.Reason);
         }
+
+        [Fact]
+        public void TcpDataReceivedEventArgs_StoresAllFields()
+        {
+            var args = new TcpDataReceivedEventArgs(1, "192.168.1.1", 5000, "hello", 5);
+            Assert.Equal(1, args.ConnectionIndex);
+            Assert.Equal("192.168.1.1", args.RemoteAddress);
+            Assert.Equal(5000, args.RemotePort);
+            Assert.Equal("hello", args.Data);
+            Assert.Equal(5, args.Length);
+        }
+
+        [Fact]
+        public void TcpConnectionClosedEventArgs_DefaultReason_IsZero()
+        {
+            var args = new TcpConnectionClosedEventArgs(0);
+            Assert.Equal(0, args.ConnectionIndex);
+            Assert.Equal(0, args.Reason);
+        }
+
+        [Fact]
+        public void TcpConnectionClosedEventArgs_StoresConnectionIndexAndReason()
+        {
+            var args = new TcpConnectionClosedEventArgs(2, 1);
+            Assert.Equal(2, args.ConnectionIndex);
+            Assert.Equal(1, args.Reason);
+        }
     }
 }
