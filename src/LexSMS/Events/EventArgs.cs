@@ -100,4 +100,66 @@ namespace LexSMS.Events
             Reason = reason;
         }
     }
+
+    /// <summary>
+    /// TCP/UDP 数据接收事件参数
+    /// </summary>
+    public class TcpDataReceivedEventArgs : EventArgs
+    {
+        /// <summary>
+        /// 连接索引
+        /// </summary>
+        public int ConnectionIndex { get; }
+
+        /// <summary>
+        /// 远端 IP 地址（UDP 模式下有值）
+        /// </summary>
+        public string RemoteAddress { get; }
+
+        /// <summary>
+        /// 远端端口（UDP 模式下有值）
+        /// </summary>
+        public int RemotePort { get; }
+
+        /// <summary>
+        /// 接收到的数据内容
+        /// </summary>
+        public string Data { get; }
+
+        /// <summary>
+        /// 数据长度（字节数，由模块报告）
+        /// </summary>
+        public int Length { get; }
+
+        public TcpDataReceivedEventArgs(int connectionIndex, string remoteAddress, int remotePort, string data, int length)
+        {
+            ConnectionIndex = connectionIndex;
+            RemoteAddress = remoteAddress;
+            RemotePort = remotePort;
+            Data = data;
+            Length = length;
+        }
+    }
+
+    /// <summary>
+    /// TCP 连接关闭事件参数
+    /// </summary>
+    public class TcpConnectionClosedEventArgs : EventArgs
+    {
+        /// <summary>
+        /// 连接索引
+        /// </summary>
+        public int ConnectionIndex { get; }
+
+        /// <summary>
+        /// 关闭原因（0=正常，其他=异常）
+        /// </summary>
+        public int Reason { get; }
+
+        public TcpConnectionClosedEventArgs(int connectionIndex, int reason = 0)
+        {
+            ConnectionIndex = connectionIndex;
+            Reason = reason;
+        }
+    }
 }

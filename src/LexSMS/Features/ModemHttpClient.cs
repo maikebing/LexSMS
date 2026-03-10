@@ -43,6 +43,16 @@ namespace LexSMS.Features
         }
 
         /// <summary>
+        /// 读取HTTP响应头（AT+HTTPHEAD）
+        /// </summary>
+        /// <param name="url">请求URL</param>
+        /// <returns>包含响应头信息的HTTP响应</returns>
+        public async Task<HttpResponse> GetHeadersAsync(string url)
+        {
+            return await RequestAsync(url, HttpMethod.HEAD);
+        }
+
+        /// <summary>
         /// 发起HTTP请求
         /// </summary>
         /// <param name="url">请求URL</param>
@@ -100,12 +110,17 @@ namespace LexSMS.Features
                 // 等待HTTP动作完成
                 var result = await WaitForHttpActionResultAsync(60000);
 
-                // 读取响应内容
-                if (result.ContentLength > 0)
+                // 读取响应内容（HEAD 请求不含响应体）
+                if (result.ContentLength > 0 && method != HttpMethod.HEAD)
                 {
                     var readResp = await _channel.SendCommandAsync($"AT+HTTPREAD=0,{Math.Min(result.ContentLength, 4096)}", 30000);
                     result.Body = ParseHttpReadResponse(readResp);
                 }
+
+                // 读取响应头（AT+HTTPHEAD）
+                var headResp = await _channel.SendCommandAsync("AT+HTTPHEAD", 10000);
+                if (headResp.IsOk)
+                    result.Headers = ParseHttpHeadResponse(headResp);
 
                 return result;
             }
@@ -165,6 +180,30 @@ namespace LexSMS.Features
             foreach (var line in resp.Lines)
             {
                 if (line.StartsWith("+HTTPREAD:", StringComparison.OrdinalIgnoreCase))
+                {
+                    reading = true;
+                    continue;
+                }
+                if (reading && line != "OK")
+                {
+                    if (sb.Length > 0) sb.Append('\n');
+                    sb.Append(line);
+                }
+            }
+            return sb.Length > 0 ? sb.ToString() : null;
+        }
+
+        private static string? ParseHttpHeadResponse(AtResponse resp)
+        {
+            // 响应格式:
+            // +HTTPHEAD: <data_len>
+            // <headers>
+            // OK
+            var sb = new System.Text.StringBuilder();
+            bool reading = false;
+            foreach (var line in resp.Lines)
+            {
+                if (line.StartsWith("+HTTPHEAD:", StringComparison.OrdinalIgnoreCase))
                 {
                     reading = true;
                     continue;

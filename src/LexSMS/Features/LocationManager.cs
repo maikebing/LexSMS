@@ -27,14 +27,8 @@ namespace LexSMS.Features
         /// <returns>基站定位结果</returns>
         public async Task<CellLocation> GetCellLocationAsync()
         {
-            // AT+CLBS=1,1 : 获取基站定位（通过网络）
-            var resp = await _channel.SendCommandAsync("AT+CLBS=1,1", 60000);
-
-            if (!resp.IsOk)
-            {
-                // 尝试AT+CLBS=4,1 : 获取基站信息（MCC/MNC/LAC/CI）
-                resp = await _channel.SendCommandAsync("AT+CLBS=4,1", 30000);
-            }
+            // AT+CLBS=1 : 获取基站定位（通过网络），文档格式为 AT+CLBS=<mode>
+            var resp = await _channel.SendCommandAsync("AT+CLBS=1", 60000);
 
             var location = new CellLocation();
 
@@ -53,55 +47,97 @@ namespace LexSMS.Features
 
         /// <summary>
         /// 获取当前基站信息（MCC/MNC/LAC/CellID）
+        /// 优先查询 4G/LTE 的 EPS 域（AT+CEREG），回退到 2G/3G 的 CS 域（AT+CREG）
         /// </summary>
         public async Task<CellLocation> GetCellInfoAsync()
         {
             var location = new CellLocation();
 
-            // 获取网络注册信息（含小区信息）
-            // AT+CREG=2 启用扩展格式
+            // 同时启用 CREG（2G/3G）和 CEREG（4G/LTE）扩展格式
             await _channel.SendCommandAsync("AT+CREG=2");
-            var resp = await _channel.SendCommandAsync("AT+CREG?");
+            await _channel.SendCommandAsync("AT+CEREG=2");
 
-            foreach (var line in resp.Lines)
+            try
             {
-                if (line.StartsWith("+CREG:", StringComparison.OrdinalIgnoreCase))
+                // 优先查询 4G/LTE EPS 域（AT+CEREG），A76XX 通常注册在 LTE 上
+                bool ceregParsed = false;
+                var ceregResp = await _channel.SendCommandAsync("AT+CEREG?");
+                foreach (var line in ceregResp.Lines)
                 {
-                    string data = line.Substring(6).Trim();
-                    string[] parts = data.Split(',');
-                    // +CREG: <n>,<stat>[,<lac>,<ci>,<AcTStatus>]
-                    if (parts.Length >= 4)
+                    if (line.StartsWith("+CEREG:", StringComparison.OrdinalIgnoreCase))
                     {
-                        if (int.TryParse(parts[2].Trim().Trim('"'), System.Globalization.NumberStyles.HexNumber, null, out int lac))
-                            location.Lac = lac;
-                        if (int.TryParse(parts[3].Trim().Trim('"'), System.Globalization.NumberStyles.HexNumber, null, out int ci))
-                            location.CellId = ci;
-                    }
-                    break;
-                }
-            }
-
-            // 获取MCC/MNC
-            var opsResp = await _channel.SendCommandAsync("AT+COPS?");
-            foreach (var line in opsResp.Lines)
-            {
-                if (line.StartsWith("+COPS:", StringComparison.OrdinalIgnoreCase))
-                {
-                    string data = line.Substring(6).Trim();
-                    string[] parts = data.Split(',');
-                    if (parts.Length >= 3)
-                    {
-                        string mccMnc = parts[2].Trim().Trim('"');
-                        if (mccMnc.Length >= 5)
+                        string data = line.Substring(7).Trim();
+                        string[] parts = data.Split(',');
+                        // +CEREG: <n>,<stat>[,<tac>,<ci>,<AcT>]
+                        // TAC (Tracking Area Code) is the LTE equivalent of LAC
+                        if (parts.Length >= 4)
                         {
-                            if (int.TryParse(mccMnc.Substring(0, 3), out int mcc))
-                                location.Mcc = mcc;
-                            if (int.TryParse(mccMnc.Substring(3), out int mnc))
-                                location.Mnc = mnc;
+                            if (int.TryParse(parts[2].Trim().Trim('"'), System.Globalization.NumberStyles.HexNumber, null, out int tac))
+                            {
+                                location.Lac = tac;  // Store TAC in the Lac field (same concept, different name for LTE)
+                                ceregParsed = true;
+                            }
+                            if (int.TryParse(parts[3].Trim().Trim('"'), System.Globalization.NumberStyles.HexNumber, null, out int ci))
+                            {
+                                location.CellId = ci;
+                                ceregParsed = true;
+                            }
+                        }
+                        break;
+                    }
+                }
+
+                // Fall back to 2G/3G CS domain only when CEREG returned no cell data at all
+                if (!ceregParsed)
+                {
+                    var cregResp = await _channel.SendCommandAsync("AT+CREG?");
+                    foreach (var line in cregResp.Lines)
+                    {
+                        if (line.StartsWith("+CREG:", StringComparison.OrdinalIgnoreCase))
+                        {
+                            string data = line.Substring(6).Trim();
+                            string[] parts = data.Split(',');
+                            // +CREG: <n>,<stat>[,<lac>,<ci>,<AcTStatus>]
+                            if (parts.Length >= 4)
+                            {
+                                if (int.TryParse(parts[2].Trim().Trim('"'), System.Globalization.NumberStyles.HexNumber, null, out int lac))
+                                    location.Lac = lac;
+                                if (int.TryParse(parts[3].Trim().Trim('"'), System.Globalization.NumberStyles.HexNumber, null, out int ci))
+                                    location.CellId = ci;
+                            }
+                            break;
                         }
                     }
-                    break;
                 }
+
+                // 获取MCC/MNC
+                var opsResp = await _channel.SendCommandAsync("AT+COPS?");
+                foreach (var line in opsResp.Lines)
+                {
+                    if (line.StartsWith("+COPS:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string data = line.Substring(6).Trim();
+                        string[] parts = data.Split(',');
+                        if (parts.Length >= 3)
+                        {
+                            string mccMnc = parts[2].Trim().Trim('"');
+                            if (mccMnc.Length >= 5)
+                            {
+                                if (int.TryParse(mccMnc.Substring(0, 3), out int mcc))
+                                    location.Mcc = mcc;
+                                if (int.TryParse(mccMnc.Substring(3), out int mnc))
+                                    location.Mnc = mnc;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            finally
+            {
+                // 使用完基站信息后恢复默认注册模式
+                await _channel.SendCommandAsync("AT+CREG=0");
+                await _channel.SendCommandAsync("AT+CEREG=0");
             }
 
             location.IsValid = location.Lac > 0 || location.CellId > 0;

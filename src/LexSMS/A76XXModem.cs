@@ -10,7 +10,7 @@ namespace LexSMS
 {
     /// <summary>
     /// A76XX 4G模块封装库
-    /// 提供拨打电话、来电显示、接听电话、收发短信、HTTP请求、MQTT连接和基站定位等功能
+    /// 提供拨打电话、来电显示、接听电话、收发短信、HTTP请求、MQTT连接、基站定位和TTS语音合成等功能
     /// </summary>
     public class A76XXModem : IDisposable
     {
@@ -21,6 +21,8 @@ namespace LexSMS
         private readonly ModemMqttClient _mqttClient;
         private readonly LocationManager _locationManager;
         private readonly StatusManager _statusManager;
+        private readonly TtsManager _ttsManager;
+        private readonly TcpIpClient _tcpIpClient;
         private bool _disposed;
 
         /// <summary>
@@ -81,6 +83,24 @@ namespace LexSMS
         }
 
         /// <summary>
+        /// TCP/UDP数据接收事件
+        /// </summary>
+        public event EventHandler<TcpDataReceivedEventArgs>? TcpDataReceived
+        {
+            add => _tcpIpClient.DataReceived += value;
+            remove => _tcpIpClient.DataReceived -= value;
+        }
+
+        /// <summary>
+        /// TCP连接关闭事件
+        /// </summary>
+        public event EventHandler<TcpConnectionClosedEventArgs>? TcpConnectionClosed
+        {
+            add => _tcpIpClient.ConnectionClosed += value;
+            remove => _tcpIpClient.ConnectionClosed -= value;
+        }
+
+        /// <summary>
         /// 底层AT命令主动上报事件
         /// </summary>
         public event EventHandler<string>? UnsolicitedMessageReceived
@@ -106,6 +126,8 @@ namespace LexSMS
             _mqttClient = new ModemMqttClient(_channel);
             _locationManager = new LocationManager(_channel);
             _statusManager = new StatusManager(_channel);
+            _ttsManager = new TtsManager(_channel);
+            _tcpIpClient = new TcpIpClient(_channel);
         }
 
         /// <summary>
@@ -129,6 +151,11 @@ namespace LexSMS
             _channel.Open();
             Log("串口连接成功，等待模块就绪...");
             await Task.Delay(500);
+
+            // 关闭命令回显（ATE0），确保响应解析不受回显影响（doc §2.14）
+            var ateResp = await _channel.SendCommandAsync("ATE0", 3000);
+            if (!ateResp.IsOk)
+                LogWarning("ATE0 失败，模块可能仍处于命令回显模式，这可能导致响应解析异常");
 
             // 测试模块响应
             LogDebug("正在测试模块响应...");
@@ -452,6 +479,14 @@ namespace LexSMS
             => _httpClient.PostAsync(url, body, contentType);
 
         /// <summary>
+        /// 读取HTTP响应头（使用AT+HTTPHEAD）
+        /// </summary>
+        /// <param name="url">请求URL</param>
+        /// <returns>HTTP响应（Headers属性包含响应头内容）</returns>
+        public Task<HttpResponse> HttpGetHeadersAsync(string url)
+            => _httpClient.GetHeadersAsync(url);
+
+        /// <summary>
         /// 通过模块发起HTTP请求（完整版本）
         /// </summary>
         public Task<HttpResponse> HttpRequestAsync(string url, Models.HttpMethod method = Models.HttpMethod.GET,
@@ -569,6 +604,13 @@ namespace LexSMS
             => _statusManager.SetGprsAttachAsync(attach);
 
         /// <summary>
+        /// 查询模块分配的 IP 地址（AT+CGPADDR）
+        /// </summary>
+        /// <returns>IP 地址字符串，查询失败返回 null</returns>
+        public Task<string?> GetIpAddressAsync()
+            => _statusManager.GetIpAddressAsync();
+
+        /// <summary>
         /// 重置模块
         /// </summary>
         public Task ResetAsync()
@@ -581,6 +623,102 @@ namespace LexSMS
         /// <param name="timeoutMs">超时时间（毫秒），0 使用默认值</param>
         public Task<AtResponse> SendRawCommandAsync(string command, int timeoutMs = 0)
             => _channel.SendCommandAsync(command, timeoutMs);
+
+        #endregion
+
+        #region TTS语音合成功能
+
+        /// <summary>
+        /// 查询模块是否支持TTS功能
+        /// </summary>
+        public Task<bool> IsTtsSupportedAsync()
+            => _ttsManager.IsSupportedAsync();
+
+        /// <summary>
+        /// 播放文字（自动判断编码：含中文使用UCS2，纯ASCII使用混合编码）
+        /// </summary>
+        /// <param name="text">要朗读的文字（支持中英文混合）</param>
+        public Task TtsSpeakAsync(string text)
+            => _ttsManager.SpeakAsync(text);
+
+        /// <summary>
+        /// 使用UCS2编码播放文字（支持所有Unicode字符，包括中文）
+        /// </summary>
+        /// <param name="text">要朗读的文字</param>
+        public Task TtsSpeakUcs2Async(string text)
+            => _ttsManager.SpeakUcs2Async(text);
+
+        /// <summary>
+        /// 使用混合编码播放文字（ASCII + GBK，适合英文与中文混合）
+        /// </summary>
+        /// <param name="text">要朗读的文字</param>
+        public Task TtsSpeakMixedAsync(string text)
+            => _ttsManager.SpeakMixedAsync(text);
+
+        /// <summary>
+        /// 停止TTS播放（AT+CTTS=0）
+        /// </summary>
+        public Task TtsStopAsync()
+            => _ttsManager.StopAsync();
+
+        #endregion
+
+        #region TCP/IP 和 UDP 功能
+
+        /// <summary>
+        /// 激活网络连接（AT+NETOPEN）
+        /// 前提：GPRS 已附着（GetGprsAttachStatusAsync 返回 Attached）
+        /// </summary>
+        public Task<bool> TcpOpenNetworkAsync()
+            => _tcpIpClient.OpenNetworkAsync();
+
+        /// <summary>
+        /// 关闭网络连接（AT+NETCLOSE）
+        /// </summary>
+        public Task<bool> TcpCloseNetworkAsync()
+            => _tcpIpClient.CloseNetworkAsync();
+
+        /// <summary>
+        /// 建立 TCP 连接（AT+CIPOPEN）
+        /// </summary>
+        /// <param name="connectionIndex">连接索引（0-9）</param>
+        /// <param name="remoteHost">远端服务器 IP 或域名</param>
+        /// <param name="remotePort">远端端口</param>
+        public Task TcpConnectAsync(int connectionIndex, string remoteHost, int remotePort)
+            => _tcpIpClient.ConnectTcpAsync(connectionIndex, remoteHost, remotePort);
+
+        /// <summary>
+        /// 打开 UDP 本地端口（AT+CIPOPEN）
+        /// </summary>
+        /// <param name="connectionIndex">连接索引（0-9）</param>
+        /// <param name="localPort">本地 UDP 端口</param>
+        public Task TcpOpenUdpAsync(int connectionIndex, int localPort)
+            => _tcpIpClient.OpenUdpAsync(connectionIndex, localPort);
+
+        /// <summary>
+        /// 发送 TCP 数据（AT+CIPSEND）
+        /// </summary>
+        /// <param name="connectionIndex">连接索引</param>
+        /// <param name="data">要发送的数据</param>
+        public Task TcpSendAsync(int connectionIndex, string data)
+            => _tcpIpClient.SendAsync(connectionIndex, data);
+
+        /// <summary>
+        /// 发送 UDP 数据（AT+CIPSEND，指定目标地址）
+        /// </summary>
+        /// <param name="connectionIndex">连接索引</param>
+        /// <param name="remoteHost">目标 IP 或域名</param>
+        /// <param name="remotePort">目标端口</param>
+        /// <param name="data">要发送的数据</param>
+        public Task TcpSendUdpAsync(int connectionIndex, string remoteHost, int remotePort, string data)
+            => _tcpIpClient.SendUdpAsync(connectionIndex, remoteHost, remotePort, data);
+
+        /// <summary>
+        /// 关闭指定 TCP/UDP 连接（AT+CIPCLOSE）
+        /// </summary>
+        /// <param name="connectionIndex">连接索引</param>
+        public Task<bool> TcpCloseConnectionAsync(int connectionIndex)
+            => _tcpIpClient.CloseConnectionAsync(connectionIndex);
 
         #endregion
 
