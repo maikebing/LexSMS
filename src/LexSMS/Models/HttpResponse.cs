@@ -18,6 +18,11 @@ namespace LexSMS.Models
         public string? Body { get; set; }
 
         /// <summary>
+        /// 响应头内容（通过 AT+HTTPHEAD 获取）
+        /// </summary>
+        public string? Headers { get; set; }
+
+        /// <summary>
         /// 响应体长度（字节）
         /// </summary>
         public int ContentLength { get; set; }
