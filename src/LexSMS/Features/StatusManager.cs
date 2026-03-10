@@ -129,15 +129,15 @@ namespace LexSMS.Features
             if (imsiResp.IsOk)
                 info.Imsi = imsiResp.FirstLine?.Trim();
 
-            // ICCID
-            var iccidResp = await _channel.SendCommandAsync("AT+CCID");
+            // ICCID - A76XX uses AT+CICCID, response: +ICCID: <iccid>
+            var iccidResp = await _channel.SendCommandAsync("AT+CICCID");
             if (iccidResp.IsOk)
             {
                 foreach (var line in iccidResp.Lines)
                 {
-                    if (line.StartsWith("+CCID:", StringComparison.OrdinalIgnoreCase))
+                    if (line.StartsWith("+ICCID:", StringComparison.OrdinalIgnoreCase))
                     {
-                        info.Iccid = line.Substring(6).Trim().Trim('"');
+                        info.Iccid = line.Substring(7).Trim().Trim('"');
                         break;
                     }
                     else if (!string.IsNullOrWhiteSpace(line) && line != "OK")
@@ -391,6 +391,35 @@ namespace LexSMS.Features
             }
 
             return GprsAttachStatus.Unknown;
+        }
+
+        /// <summary>
+        /// 查询模块分配的 IP 地址 (AT+CGPADDR)
+        /// </summary>
+        /// <returns>IP 地址字符串，查询失败返回 null</returns>
+        public async Task<string?> GetIpAddressAsync()
+        {
+            var resp = await _channel.SendCommandAsync("AT+CGPADDR");
+            if (!resp.IsOk) return null;
+
+            foreach (var line in resp.Lines)
+            {
+                // 响应格式: +CGPADDR: <cid>,<addr>
+                if (line.StartsWith("+CGPADDR:", StringComparison.OrdinalIgnoreCase))
+                {
+                    string data = line.Substring(9).Trim();
+                    int commaIdx = data.IndexOf(',');
+                    if (commaIdx >= 0)
+                    {
+                        string addr = data.Substring(commaIdx + 1).Trim().Trim('"');
+                        if (!string.IsNullOrEmpty(addr))
+                            return addr;
+                    }
+                    break;
+                }
+            }
+
+            return null;
         }
 
         /// <summary>

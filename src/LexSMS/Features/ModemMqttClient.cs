@@ -12,11 +12,20 @@ namespace LexSMS.Features
     /// <summary>
     /// MQTT客户端
     /// 通过A76XX模块实现MQTT连接、发布和订阅
+    /// 使用 AT+CMQTT* 指令集（A76XX 原生MQTT协议栈）
     /// </summary>
     public class ModemMqttClient
     {
         private readonly AtChannel _channel;
         private bool _isConnected;
+        // A76XX支持多个客户端，默认使用索引0
+        private const int ClientIndex = 0;
+
+        // 用于组装多行 +CMQTTRX* 消息
+        private string? _rxTopic;
+        private System.Text.StringBuilder? _rxPayload;
+        private bool _rxReadingTopic;
+        private bool _rxReadingPayload;
 
         /// <summary>
         /// MQTT消息接收事件
@@ -49,36 +58,45 @@ namespace LexSMS.Features
             if (string.IsNullOrWhiteSpace(config.BrokerAddress))
                 throw new ArgumentException("Broker地址不能为空", nameof(config));
 
-            // 配置MQTT URL: tcp://<host>:<port>
+            // 1. 启动 MQTT 协议栈: AT+CMQTTSTART
+            var startResp = await _channel.SendCommandAsync("AT+CMQTTSTART", 10000);
+            // 如果已经启动，模块可能返回 ERROR，忽略此错误继续
+
+            // 2. 分配客户端 ID: AT+CMQTTACCQ=<index>,"<clientid>",<qos>
+            string clientId = string.IsNullOrEmpty(config.ClientId) ? "A76XX_Client" : config.ClientId;
+            var accqResp = await _channel.SendCommandAsync(
+                $"AT+CMQTTACCQ={ClientIndex},\"{clientId}\",0", 10000);
+            if (!accqResp.IsOk)
+                throw new AtCommandErrorException("AT+CMQTTACCQ", accqResp.RawResponse);
+
+            // 3. 连接到 MQTT 服务器: AT+CMQTTCONNECT=<index>,"tcp://<host>:<port>",<keepalive>,<clean_session>
             string protocol = config.UseSsl ? "ssl" : "tcp";
             string url = $"{protocol}://{config.BrokerAddress}:{config.Port}";
+            int cleanSession = config.CleanSession ? 1 : 0;
 
-            var urlResp = await _channel.SendCommandAsync($"AT+SMCONF=\"URL\",\"{url}\"");
-            if (!urlResp.IsOk)
-                throw new AtCommandErrorException("AT+SMCONF URL", urlResp.RawResponse);
-
-            // 配置Keep-Alive
-            await _channel.SendCommandAsync($"AT+SMCONF=\"KEEPTIME\",{config.KeepAliveSeconds}");
-
-            // 配置Client ID
-            if (!string.IsNullOrEmpty(config.ClientId))
-                await _channel.SendCommandAsync($"AT+SMCONF=\"CLIENTID\",\"{config.ClientId}\"");
-
-            // 配置用户名密码
+            string connCmd = $"AT+CMQTTCONNECT={ClientIndex},\"{url}\",{config.KeepAliveSeconds},{cleanSession}";
+            // 如果有用户名密码，附加到命令
             if (!string.IsNullOrEmpty(config.Username))
             {
-                await _channel.SendCommandAsync($"AT+SMCONF=\"USERNAME\",\"{config.Username}\"");
-                if (!string.IsNullOrEmpty(config.Password))
-                    await _channel.SendCommandAsync($"AT+SMCONF=\"PASSWORD\",\"{config.Password}\"");
+                string pwd = config.Password ?? string.Empty;
+                connCmd += $",\"{config.Username}\",\"{pwd}\"";
             }
 
-            // 配置清除会话
-            await _channel.SendCommandAsync($"AT+SMCONF=\"CLEANSS\",{(config.CleanSession ? 1 : 0)}");
-
-            // 建立MQTT连接
-            var connResp = await _channel.SendCommandAsync("AT+SMCONN", 30000);
+            var connResp = await _channel.SendCommandAsync(connCmd, 30000);
             if (!connResp.IsOk)
-                throw new AtCommandErrorException("AT+SMCONN", connResp.RawResponse);
+                throw new AtCommandErrorException("AT+CMQTTCONNECT", connResp.RawResponse);
+
+            // 等待连接确认 URC: +CMQTTCONNECT: <index>,<result>
+            // result=0 表示成功
+            var connected = await WaitForUrcAsync("+CMQTTCONNECT:", 30000);
+            if (connected != null)
+            {
+                // +CMQTTCONNECT: 0,0 — 第二个参数为错误码，0=成功
+                string data = connected.Substring(connected.IndexOf(':') + 1).Trim();
+                string[] parts = data.Split(',');
+                if (parts.Length >= 2 && int.TryParse(parts[1].Trim(), out int errCode) && errCode != 0)
+                    throw new ModemException($"MQTT连接失败，错误码: {errCode}");
+            }
 
             _isConnected = true;
             ConnectionStateChanged?.Invoke(this, new MqttConnectionStateChangedEventArgs(true));
@@ -89,7 +107,13 @@ namespace LexSMS.Features
         /// </summary>
         public async Task DisconnectAsync()
         {
-            var resp = await _channel.SendCommandAsync("AT+SMDISC");
+            // AT+CMQTTDISC=<index>,<timeout>
+            await _channel.SendCommandAsync($"AT+CMQTTDISC={ClientIndex},120", 10000);
+            // 释放客户端资源: AT+CMQTTREL=<index>
+            await _channel.SendCommandAsync($"AT+CMQTTREL={ClientIndex}", 5000);
+            // 停止 MQTT 协议栈: AT+CMQTTSTOP
+            await _channel.SendCommandAsync("AT+CMQTTSTOP", 5000);
+
             _isConnected = false;
             ConnectionStateChanged?.Invoke(this, new MqttConnectionStateChangedEventArgs(false, "主动断开"));
         }
@@ -110,21 +134,34 @@ namespace LexSMS.Features
             if (payload == null)
                 throw new ArgumentNullException(nameof(payload));
 
-            int retainFlag = retain ? 1 : 0;
-            int payloadLen = payload.Length;
+            // 1. 设置发布主题: AT+CMQTTTOPIC=<index>,<topic_length>
+            var topicResp = await _channel.SendCommandAsync(
+                $"AT+CMQTTTOPIC={ClientIndex},{topic.Length}", 5000);
+            if (!topicResp.RawResponse.Contains(">"))
+                throw new ModemException("未收到主题输入提示符");
 
-            // AT+SMPUB=<topic>,<content_length>,<qos>,<retain>
-            var promptResp = await _channel.SendCommandAsync(
-                $"AT+SMPUB=\"{topic}\",{payloadLen},{qos},{retainFlag}", 10000);
+            _channel.SendRaw(topic);
+            await Task.Delay(100);
 
-            if (promptResp.IsError)
-                throw new AtCommandErrorException("AT+SMPUB", promptResp.RawResponse);
+            // 2. 设置发布内容: AT+CMQTTPAYLOAD=<index>,<payload_length>
+            int payloadLen = System.Text.Encoding.UTF8.GetByteCount(payload);
+            var payloadResp = await _channel.SendCommandAsync(
+                $"AT+CMQTTPAYLOAD={ClientIndex},{payloadLen}", 5000);
+            if (!payloadResp.RawResponse.Contains(">"))
+                throw new ModemException("未收到消息内容输入提示符");
 
-            // 发送消息内容（不含结尾换行符，长度已在命令中指定）
             _channel.SendRaw(payload);
+            await Task.Delay(100);
 
-            // 等待发送完成
-            await Task.Delay(1000);
+            // 3. 执行发布: AT+CMQTTPUB=<index>,<qos>,<timeout>
+            int retainFlag = retain ? 1 : 0;
+            var pubResp = await _channel.SendCommandAsync(
+                $"AT+CMQTTPUB={ClientIndex},{qos},60,{retainFlag}", 30000);
+            if (!pubResp.IsOk)
+                throw new AtCommandErrorException("AT+CMQTTPUB", pubResp.RawResponse);
+
+            // 等待发布完成 URC: +CMQTTPUB: <index>,<result>
+            await WaitForUrcAsync("+CMQTTPUB:", 30000);
         }
 
         /// <summary>
@@ -139,9 +176,19 @@ namespace LexSMS.Features
             if (string.IsNullOrWhiteSpace(topic))
                 throw new ArgumentException("主题不能为空", nameof(topic));
 
-            var resp = await _channel.SendCommandAsync($"AT+SMSUB=\"{topic}\",{qos}", 10000);
-            if (!resp.IsOk)
-                throw new AtCommandErrorException("AT+SMSUB", resp.RawResponse);
+            // 1. 设置订阅主题: AT+CMQTTSUBTOPIC=<index>,<topic_length>,<qos>
+            var subTopicResp = await _channel.SendCommandAsync(
+                $"AT+CMQTTSUBTOPIC={ClientIndex},{topic.Length},{qos}", 5000);
+            if (!subTopicResp.RawResponse.Contains(">"))
+                throw new ModemException("未收到订阅主题输入提示符");
+
+            _channel.SendRaw(topic);
+            await Task.Delay(100);
+
+            // 2. 执行订阅: AT+CMQTTSUB=<index>
+            var subResp = await _channel.SendCommandAsync($"AT+CMQTTSUB={ClientIndex}", 10000);
+            if (!subResp.IsOk)
+                throw new AtCommandErrorException("AT+CMQTTSUB", subResp.RawResponse);
         }
 
         /// <summary>
@@ -152,44 +199,121 @@ namespace LexSMS.Features
             if (!_isConnected)
                 throw new ModemException("MQTT未连接，请先调用ConnectAsync");
 
-            var resp = await _channel.SendCommandAsync($"AT+SMUNSUB=\"{topic}\"", 10000);
-            if (!resp.IsOk)
-                throw new AtCommandErrorException("AT+SMUNSUB", resp.RawResponse);
+            // 1. 设置取消订阅主题长度: AT+CMQTTSUBTOPIC=<index>,<topic_length>,<qos>
+            var subTopicResp = await _channel.SendCommandAsync(
+                $"AT+CMQTTSUBTOPIC={ClientIndex},{topic.Length},0", 5000);
+            if (!subTopicResp.RawResponse.Contains(">"))
+                throw new ModemException("未收到取消订阅主题输入提示符");
+
+            _channel.SendRaw(topic);
+            await Task.Delay(100);
+
+            // 2. 执行取消订阅: AT+CMQTTUNSUB=<index>
+            var unsubResp = await _channel.SendCommandAsync($"AT+CMQTTUNSUB={ClientIndex}", 10000);
+            if (!unsubResp.IsOk)
+                throw new AtCommandErrorException("AT+CMQTTUNSUB", unsubResp.RawResponse);
+        }
+
+        /// <summary>
+        /// 等待指定前缀的 URC 消息
+        /// </summary>
+        private Task<string?> WaitForUrcAsync(string prefix, int timeoutMs)
+        {
+            var tcs = new TaskCompletionSource<string?>();
+            var cts = new CancellationTokenSource(timeoutMs);
+
+            void handler(object? sender, string urc)
+            {
+                if (urc.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                    tcs.TrySetResult(urc);
+            }
+
+            _channel.UnsolicitedReceived += handler;
+            cts.Token.Register(() => tcs.TrySetResult(null));
+
+            return tcs.Task.ContinueWith(t =>
+            {
+                _channel.UnsolicitedReceived -= handler;
+                cts.Dispose();
+                return t.Result;
+            });
         }
 
         private void OnUnsolicitedReceived(object? sender, string urc)
         {
-            // MQTT消息接收: +SMSUB: "<topic>",<len>\r\n<payload>
-            if (urc.StartsWith("+SMSUB:", StringComparison.OrdinalIgnoreCase))
+            // MQTT 消息接收流程 (多行URC):
+            // +CMQTTRXSTART: 0,<topic_len>,<payload_len>
+            // +CMQTTRXTOPIC: 0,<topic_len>
+            // <topic>
+            // +CMQTTRXPAYLOAD: 0,<payload_len>
+            // <payload>
+            // +CMQTTRXEND: 0
+
+            if (urc.StartsWith("+CMQTTRXSTART:", StringComparison.OrdinalIgnoreCase))
             {
-                string data = urc.Substring(7).Trim();
-                // 格式: "<topic>",<len>
-                int commaIdx = data.LastIndexOf(',');
-                if (commaIdx > 0)
-                {
-                    string topic = data.Substring(0, commaIdx).Trim().Trim('"');
-                    // payload在下一个URC中到达，或者拼接在同一行
-                    // 简化处理：通知调用方
-                    MessageReceived?.Invoke(this, new MqttMessageReceivedEventArgs(
-                        new MqttMessage { Topic = topic, Payload = string.Empty }));
-                }
+                // 新消息开始，重置缓冲
+                _rxTopic = null;
+                _rxPayload = new System.Text.StringBuilder();
+                _rxReadingTopic = false;
+                _rxReadingPayload = false;
             }
-            // MQTT断开连接通知
-            else if (urc.StartsWith("+SMSTATE:", StringComparison.OrdinalIgnoreCase))
+            else if (urc.StartsWith("+CMQTTRXTOPIC:", StringComparison.OrdinalIgnoreCase))
             {
-                string data = urc.Substring(9).Trim();
-                if (data == "0")
+                // 之后的行是主题内容，直到下一个 URC 标记
+                _rxReadingTopic = true;
+                _rxReadingPayload = false;
+                _rxTopic = null;
+            }
+            else if (urc.StartsWith("+CMQTTRXPAYLOAD:", StringComparison.OrdinalIgnoreCase))
+            {
+                // 之后的行是消息内容，直到下一个 URC 标记
+                _rxReadingTopic = false;
+                _rxReadingPayload = true;
+                _rxPayload?.Clear();
+            }
+            else if (urc.StartsWith("+CMQTTRXEND:", StringComparison.OrdinalIgnoreCase))
+            {
+                // 消息接收完成，触发事件
+                _rxReadingTopic = false;
+                _rxReadingPayload = false;
+                if (_rxTopic != null)
                 {
-                    _isConnected = false;
-                    ConnectionStateChanged?.Invoke(this,
-                        new MqttConnectionStateChangedEventArgs(false, "网络断开"));
+                    var msg = new MqttMessage
+                    {
+                        Topic = _rxTopic,
+                        Payload = _rxPayload?.ToString() ?? string.Empty
+                    };
+                    MessageReceived?.Invoke(this, new MqttMessageReceivedEventArgs(msg));
                 }
-                else if (data == "1")
-                {
-                    _isConnected = true;
-                    ConnectionStateChanged?.Invoke(this,
-                        new MqttConnectionStateChangedEventArgs(true));
-                }
+                _rxTopic = null;
+                _rxPayload = null;
+            }
+            else if (_rxReadingTopic)
+            {
+                // 累积主题内容（主题通常是单行，但保持健壮性）
+                if (_rxTopic == null)
+                    _rxTopic = urc;
+                else
+                    _rxTopic += urc;
+            }
+            else if (_rxReadingPayload && _rxPayload != null)
+            {
+                // 累积消息内容（消息可能跨越多行，直接拼接不加换行符以保持原始数据）
+                _rxPayload.Append(urc);
+            }
+            // MQTT 连接丢失: +CMQTTCONNLOST: <index>,<reason>
+            else if (urc.StartsWith("+CMQTTCONNLOST:", StringComparison.OrdinalIgnoreCase))
+            {
+                _isConnected = false;
+                ConnectionStateChanged?.Invoke(this,
+                    new MqttConnectionStateChangedEventArgs(false, "连接丢失"));
+            }
+            // MQTT 连接断开: +CMQTTNOCONN: <index>
+            else if (urc.StartsWith("+CMQTTNOCONN:", StringComparison.OrdinalIgnoreCase))
+            {
+                _isConnected = false;
+                ConnectionStateChanged?.Invoke(this,
+                    new MqttConnectionStateChangedEventArgs(false, "连接断开"));
             }
         }
     }

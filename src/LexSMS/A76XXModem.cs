@@ -10,7 +10,7 @@ namespace LexSMS
 {
     /// <summary>
     /// A76XX 4G模块封装库
-    /// 提供拨打电话、来电显示、接听电话、收发短信、HTTP请求、MQTT连接和基站定位等功能
+    /// 提供拨打电话、来电显示、接听电话、收发短信、HTTP请求、MQTT连接、基站定位和TTS语音合成等功能
     /// </summary>
     public class A76XXModem : IDisposable
     {
@@ -21,6 +21,7 @@ namespace LexSMS
         private readonly ModemMqttClient _mqttClient;
         private readonly LocationManager _locationManager;
         private readonly StatusManager _statusManager;
+        private readonly TtsManager _ttsManager;
         private bool _disposed;
 
         /// <summary>
@@ -106,6 +107,7 @@ namespace LexSMS
             _mqttClient = new ModemMqttClient(_channel);
             _locationManager = new LocationManager(_channel);
             _statusManager = new StatusManager(_channel);
+            _ttsManager = new TtsManager(_channel);
         }
 
         /// <summary>
@@ -452,6 +454,14 @@ namespace LexSMS
             => _httpClient.PostAsync(url, body, contentType);
 
         /// <summary>
+        /// 读取HTTP响应头（使用AT+HTTPHEAD）
+        /// </summary>
+        /// <param name="url">请求URL</param>
+        /// <returns>HTTP响应（Headers属性包含响应头内容）</returns>
+        public Task<HttpResponse> HttpGetHeadersAsync(string url)
+            => _httpClient.GetHeadersAsync(url);
+
+        /// <summary>
         /// 通过模块发起HTTP请求（完整版本）
         /// </summary>
         public Task<HttpResponse> HttpRequestAsync(string url, Models.HttpMethod method = Models.HttpMethod.GET,
@@ -569,6 +579,13 @@ namespace LexSMS
             => _statusManager.SetGprsAttachAsync(attach);
 
         /// <summary>
+        /// 查询模块分配的 IP 地址（AT+CGPADDR）
+        /// </summary>
+        /// <returns>IP 地址字符串，查询失败返回 null</returns>
+        public Task<string?> GetIpAddressAsync()
+            => _statusManager.GetIpAddressAsync();
+
+        /// <summary>
         /// 重置模块
         /// </summary>
         public Task ResetAsync()
@@ -581,6 +598,43 @@ namespace LexSMS
         /// <param name="timeoutMs">超时时间（毫秒），0 使用默认值</param>
         public Task<AtResponse> SendRawCommandAsync(string command, int timeoutMs = 0)
             => _channel.SendCommandAsync(command, timeoutMs);
+
+        #endregion
+
+        #region TTS语音合成功能
+
+        /// <summary>
+        /// 查询模块是否支持TTS功能
+        /// </summary>
+        public Task<bool> IsTtsSupportedAsync()
+            => _ttsManager.IsSupportedAsync();
+
+        /// <summary>
+        /// 播放文字（自动判断编码：含中文使用UCS2，纯ASCII使用混合编码）
+        /// </summary>
+        /// <param name="text">要朗读的文字（支持中英文混合）</param>
+        public Task TtsSpeakAsync(string text)
+            => _ttsManager.SpeakAsync(text);
+
+        /// <summary>
+        /// 使用UCS2编码播放文字（支持所有Unicode字符，包括中文）
+        /// </summary>
+        /// <param name="text">要朗读的文字</param>
+        public Task TtsSpeakUcs2Async(string text)
+            => _ttsManager.SpeakUcs2Async(text);
+
+        /// <summary>
+        /// 使用混合编码播放文字（ASCII + GBK，适合英文与中文混合）
+        /// </summary>
+        /// <param name="text">要朗读的文字</param>
+        public Task TtsSpeakMixedAsync(string text)
+            => _ttsManager.SpeakMixedAsync(text);
+
+        /// <summary>
+        /// 停止TTS播放（AT+CTTS=0）
+        /// </summary>
+        public Task TtsStopAsync()
+            => _ttsManager.StopAsync();
 
         #endregion
 
