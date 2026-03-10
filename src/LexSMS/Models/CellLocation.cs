@@ -31,7 +31,8 @@ namespace LexSMS.Models
         public int Mnc { get; set; }
 
         /// <summary>
-        /// 位置区域码 (LAC)
+        /// 位置区域码 (LAC)，或 LTE 跟踪区域码 (TAC)
+        /// 2G/3G 网络使用 LAC；4G/LTE 网络使用 TAC（含义相同，均存储在此字段）
         /// </summary>
         public int Lac { get; set; }
 
