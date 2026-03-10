@@ -1,0 +1,356 @@
+using System;
+using System.Threading.Tasks;
+using LexSMS.Core;
+using LexSMS.Events;
+using LexSMS.Features;
+using LexSMS.Models;
+
+namespace LexSMS
+{
+    /// <summary>
+    /// A76XX 4G模块封装库
+    /// 提供拨打电话、来电显示、接听电话、收发短信、HTTP请求、MQTT连接和基站定位等功能
+    /// </summary>
+    public class A76XXModem : IDisposable
+    {
+        private readonly AtChannel _channel;
+        private readonly CallManager _callManager;
+        private readonly SmsManager _smsManager;
+        private readonly ModemHttpClient _httpClient;
+        private readonly ModemMqttClient _mqttClient;
+        private readonly LocationManager _locationManager;
+        private readonly StatusManager _statusManager;
+        private bool _disposed;
+
+        #region 事件
+
+        /// <summary>
+        /// 来电事件
+        /// </summary>
+        public event EventHandler<IncomingCallEventArgs>? IncomingCall
+        {
+            add => _callManager.IncomingCall += value;
+            remove => _callManager.IncomingCall -= value;
+        }
+
+        /// <summary>
+        /// 通话状态变更事件
+        /// </summary>
+        public event EventHandler<CallStateChangedEventArgs>? CallStateChanged
+        {
+            add => _callManager.CallStateChanged += value;
+            remove => _callManager.CallStateChanged -= value;
+        }
+
+        /// <summary>
+        /// 收到新短信事件
+        /// </summary>
+        public event EventHandler<SmsReceivedEventArgs>? SmsReceived
+        {
+            add => _smsManager.SmsReceived += value;
+            remove => _smsManager.SmsReceived -= value;
+        }
+
+        /// <summary>
+        /// MQTT消息接收事件
+        /// </summary>
+        public event EventHandler<MqttMessageReceivedEventArgs>? MqttMessageReceived
+        {
+            add => _mqttClient.MessageReceived += value;
+            remove => _mqttClient.MessageReceived -= value;
+        }
+
+        /// <summary>
+        /// MQTT连接状态变更事件
+        /// </summary>
+        public event EventHandler<MqttConnectionStateChangedEventArgs>? MqttConnectionStateChanged
+        {
+            add => _mqttClient.ConnectionStateChanged += value;
+            remove => _mqttClient.ConnectionStateChanged -= value;
+        }
+
+        /// <summary>
+        /// 底层AT命令主动上报事件
+        /// </summary>
+        public event EventHandler<string>? UnsolicitedMessageReceived
+        {
+            add => _channel.UnsolicitedReceived += value;
+            remove => _channel.UnsolicitedReceived -= value;
+        }
+
+        #endregion
+
+        /// <summary>
+        /// 创建A76XX模块实例
+        /// </summary>
+        /// <param name="config">串口配置</param>
+        public A76XXModem(SerialPortConfig config)
+        {
+            if (config == null) throw new ArgumentNullException(nameof(config));
+
+            _channel = new AtChannel(config);
+            _callManager = new CallManager(_channel);
+            _smsManager = new SmsManager(_channel);
+            _httpClient = new ModemHttpClient(_channel);
+            _mqttClient = new ModemMqttClient(_channel);
+            _locationManager = new LocationManager(_channel);
+            _statusManager = new StatusManager(_channel);
+        }
+
+        /// <summary>
+        /// 使用串口名称和波特率创建A76XX模块实例
+        /// </summary>
+        /// <param name="portName">串口名称，例如 COM3 或 /dev/ttyUSB0</param>
+        /// <param name="baudRate">波特率，默认 115200</param>
+        public A76XXModem(string portName, int baudRate = 115200)
+            : this(new SerialPortConfig { PortName = portName, BaudRate = baudRate })
+        {
+        }
+
+        #region 连接管理
+
+        /// <summary>
+        /// 打开串口并初始化模块
+        /// </summary>
+        public async Task OpenAsync()
+        {
+            _channel.Open();
+            await Task.Delay(500); // 等待模块就绪
+
+            // 初始化基本设置
+            await _statusManager.PingAsync();
+            await _callManager.InitializeAsync();
+            await _smsManager.InitializeAsync();
+        }
+
+        /// <summary>
+        /// 关闭串口连接
+        /// </summary>
+        public void Close()
+        {
+            _channel.Close();
+        }
+
+        /// <summary>
+        /// 串口是否已打开
+        /// </summary>
+        public bool IsOpen => _channel.IsOpen;
+
+        #endregion
+
+        #region 通话功能
+
+        /// <summary>
+        /// 拨打电话
+        /// </summary>
+        /// <param name="phoneNumber">目标电话号码（例如 +8613800138000 或 13800138000）</param>
+        /// <returns>通话信息</returns>
+        public Task<CallInfo> DialAsync(string phoneNumber)
+            => _callManager.DialAsync(phoneNumber);
+
+        /// <summary>
+        /// 接听来电
+        /// </summary>
+        public Task AnswerCallAsync()
+            => _callManager.AnswerAsync();
+
+        /// <summary>
+        /// 挂断电话
+        /// </summary>
+        public Task HangUpAsync()
+            => _callManager.HangUpAsync();
+
+        /// <summary>
+        /// 拒接来电
+        /// </summary>
+        public Task RejectCallAsync()
+            => _callManager.RejectAsync();
+
+        /// <summary>
+        /// 获取当前通话状态
+        /// </summary>
+        public Task<CallInfo> GetCurrentCallAsync()
+            => _callManager.GetCurrentCallAsync();
+
+        #endregion
+
+        #region 短信功能
+
+        /// <summary>
+        /// 发送短信（自动识别中英文，支持Unicode字符）
+        /// </summary>
+        /// <param name="phoneNumber">目标手机号码</param>
+        /// <param name="message">短信内容（支持中文）</param>
+        public Task SendSmsAsync(string phoneNumber, string message)
+            => _smsManager.SendSmsAsync(phoneNumber, message);
+
+        /// <summary>
+        /// 读取指定索引的短信
+        /// </summary>
+        /// <param name="index">短信索引</param>
+        public Task<SmsMessage?> ReadSmsAsync(int index)
+            => _smsManager.ReadSmsAsync(index);
+
+        /// <summary>
+        /// 列出所有短信
+        /// </summary>
+        /// <param name="status">短信状态过滤</param>
+        public Task<System.Collections.Generic.List<SmsMessage>> ListSmsAsync(SmsStatus status = SmsStatus.All)
+            => _smsManager.ListSmsAsync(status);
+
+        /// <summary>
+        /// 删除指定短信
+        /// </summary>
+        public Task DeleteSmsAsync(int index)
+            => _smsManager.DeleteSmsAsync(index);
+
+        /// <summary>
+        /// 删除所有短信
+        /// </summary>
+        public Task DeleteAllSmsAsync()
+            => _smsManager.DeleteAllSmsAsync();
+
+        #endregion
+
+        #region HTTP功能
+
+        /// <summary>
+        /// 通过模块发起HTTP GET请求
+        /// </summary>
+        /// <param name="url">请求URL（支持HTTP/HTTPS）</param>
+        /// <returns>HTTP响应</returns>
+        public Task<HttpResponse> HttpGetAsync(string url)
+            => _httpClient.GetAsync(url);
+
+        /// <summary>
+        /// 通过模块发起HTTP POST请求
+        /// </summary>
+        /// <param name="url">请求URL</param>
+        /// <param name="body">请求体内容</param>
+        /// <param name="contentType">Content-Type，默认 application/json</param>
+        /// <returns>HTTP响应</returns>
+        public Task<HttpResponse> HttpPostAsync(string url, string body, string contentType = "application/json")
+            => _httpClient.PostAsync(url, body, contentType);
+
+        /// <summary>
+        /// 通过模块发起HTTP请求（完整版本）
+        /// </summary>
+        public Task<HttpResponse> HttpRequestAsync(string url, Models.HttpMethod method = Models.HttpMethod.GET,
+            string? body = null, string contentType = "application/json")
+            => _httpClient.RequestAsync(url, method, body, contentType);
+
+        #endregion
+
+        #region MQTT功能
+
+        /// <summary>
+        /// 连接MQTT Broker
+        /// </summary>
+        /// <param name="config">MQTT连接配置</param>
+        public Task MqttConnectAsync(MqttConfig config)
+            => _mqttClient.ConnectAsync(config);
+
+        /// <summary>
+        /// 断开MQTT连接
+        /// </summary>
+        public Task MqttDisconnectAsync()
+            => _mqttClient.DisconnectAsync();
+
+        /// <summary>
+        /// 发布MQTT消息
+        /// </summary>
+        /// <param name="topic">主题</param>
+        /// <param name="payload">消息内容</param>
+        /// <param name="qos">QoS等级（0, 1, 2）</param>
+        /// <param name="retain">是否保留消息</param>
+        public Task MqttPublishAsync(string topic, string payload, int qos = 0, bool retain = false)
+            => _mqttClient.PublishAsync(topic, payload, qos, retain);
+
+        /// <summary>
+        /// 订阅MQTT主题
+        /// </summary>
+        /// <param name="topic">主题（支持 + 和 # 通配符）</param>
+        /// <param name="qos">QoS等级</param>
+        public Task MqttSubscribeAsync(string topic, int qos = 0)
+            => _mqttClient.SubscribeAsync(topic, qos);
+
+        /// <summary>
+        /// 取消订阅MQTT主题
+        /// </summary>
+        public Task MqttUnsubscribeAsync(string topic)
+            => _mqttClient.UnsubscribeAsync(topic);
+
+        /// <summary>
+        /// MQTT是否已连接
+        /// </summary>
+        public bool IsMqttConnected => _mqttClient.IsConnected;
+
+        #endregion
+
+        #region 定位功能
+
+        /// <summary>
+        /// 获取基站定位信息（通过运营商网络定位）
+        /// </summary>
+        /// <returns>定位结果，包含经纬度和精度</returns>
+        public Task<CellLocation> GetCellLocationAsync()
+            => _locationManager.GetCellLocationAsync();
+
+        /// <summary>
+        /// 获取当前基站信息（MCC/MNC/LAC/CellID）
+        /// </summary>
+        public Task<CellLocation> GetCellInfoAsync()
+            => _locationManager.GetCellInfoAsync();
+
+        #endregion
+
+        #region 状态查询
+
+        /// <summary>
+        /// 获取模块信息（制造商、型号、固件版本、IMEI）
+        /// </summary>
+        public Task<ModuleInfo> GetModuleInfoAsync()
+            => _statusManager.GetModuleInfoAsync();
+
+        /// <summary>
+        /// 获取SIM卡状态信息（IMSI、ICCID、电话号码等）
+        /// </summary>
+        public Task<SimInfo> GetSimInfoAsync()
+            => _statusManager.GetSimInfoAsync();
+
+        /// <summary>
+        /// 获取信号强度信息
+        /// </summary>
+        public Task<SignalInfo> GetSignalInfoAsync()
+            => _statusManager.GetSignalInfoAsync();
+
+        /// <summary>
+        /// 获取网络注册状态和运营商信息
+        /// </summary>
+        public Task<NetworkInfo> GetNetworkInfoAsync()
+            => _statusManager.GetNetworkInfoAsync();
+
+        /// <summary>
+        /// 测试模块是否响应（发送AT命令）
+        /// </summary>
+        public Task<bool> PingAsync()
+            => _statusManager.PingAsync();
+
+        /// <summary>
+        /// 重置模块
+        /// </summary>
+        public Task ResetAsync()
+            => _statusManager.ResetAsync();
+
+        #endregion
+
+        public void Dispose()
+        {
+            if (!_disposed)
+            {
+                _disposed = true;
+                _channel.Dispose();
+            }
+        }
+    }
+}
