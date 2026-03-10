@@ -4,7 +4,24 @@
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+
+    <!-- NuGet Package Metadata -->
+    <PackageId>LexSMS</PackageId>
+    <Authors>maikebing</Authors>
+    <Company>maikebing</Company>
+    <Description>A .NET library for communicating with A76XX series modems (4G/LTE modules) via AT commands. Supports SMS, calls, network status, and GPRS features.</Description>
+    <PackageTags>A76XX;Modem;SMS;4G;LTE;AT-Commands;IoT;Serial-Communication</PackageTags>
+    <PackageProjectUrl>https://github.com/maikebing/LexSMS</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/maikebing/LexSMS</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="System.IO.Ports" Version="10.0.3" />
