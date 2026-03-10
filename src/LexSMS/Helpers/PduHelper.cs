@@ -126,7 +126,7 @@ namespace LexSMS.Helpers
         }
 
         /// <summary>
-        /// 解码PDU格式的短信
+        /// 解码PDU形式的短信
         /// </summary>
         public static (string PhoneNumber, string Message, DateTime? Timestamp) DecodePdu(string pduHex)
         {
@@ -182,9 +182,11 @@ namespace LexSMS.Helpers
 
             // UDHI跳过头信息
             int udStart = 0;
+            int udhBytesLength = 0;
             if (hasUdhi && pos < pduHex.Length)
             {
                 int udhLen = Convert.ToInt32(pduHex.Substring(pos, 2), 16);
+                udhBytesLength = udhLen + 1;
                 udStart = (udhLen + 1) * 2;
             }
 
@@ -192,15 +194,32 @@ namespace LexSMS.Helpers
             string message;
             if (isUcs2)
             {
-                message = DecodeUcs2(userDataHex.Substring(udStart));
+                string contentHex = udStart >= userDataHex.Length ? string.Empty : userDataHex.Substring(udStart);
+                message = DecodeUcs2(contentHex);
             }
             else if (is8Bit)
             {
-                message = Encoding.UTF8.GetString(HexStringToBytes(userDataHex));
+                byte[] userDataBytes = HexStringToBytes(userDataHex);
+                int contentOffset = Math.Min(udhBytesLength, userDataBytes.Length);
+                message = Encoding.UTF8.GetString(userDataBytes, contentOffset, userDataBytes.Length - contentOffset);
             }
             else
             {
-                message = DecodeGsm7Bit(HexStringToBytes(userDataHex), udLen);
+                byte[] userDataBytes = HexStringToBytes(userDataHex);
+                if (hasUdhi && udhBytesLength > 0)
+                {
+                    int headerSeptetCount = (udhBytesLength * 8 + 6) / 7;
+                    int fillBits = (headerSeptetCount * 7) - (udhBytesLength * 8);
+                    int messageSeptetCount = Math.Max(udLen - headerSeptetCount, 0);
+                    int contentByteOffset = Math.Min(udhBytesLength, userDataBytes.Length);
+                    byte[] contentBytes = new byte[userDataBytes.Length - contentByteOffset];
+                    Array.Copy(userDataBytes, contentByteOffset, contentBytes, 0, contentBytes.Length);
+                    message = DecodeGsm7Bit(contentBytes, messageSeptetCount, fillBits).TrimEnd('\0');
+                }
+                else
+                {
+                    message = DecodeGsm7Bit(userDataBytes, udLen);
+                }
             }
 
             return (phoneNumber, message, timestamp);
@@ -302,11 +321,21 @@ namespace LexSMS.Helpers
 
         private static string DecodeGsm7Bit(byte[] data, int charCount)
         {
+            return DecodeGsm7Bit(data, charCount, 0);
+        }
+
+        private static string DecodeGsm7Bit(byte[] data, int charCount, int bitOffset)
+        {
             var sb = new StringBuilder();
-            int bitPos = 0;
+            int bitPos = bitOffset;
             for (int i = 0; i < charCount; i++)
             {
                 int byteIdx = bitPos / 8;
+                if (byteIdx >= data.Length)
+                {
+                    break;
+                }
+
                 int bitIdx = bitPos % 8;
                 int c = (data[byteIdx] >> bitIdx) & 0x7F;
                 if (bitIdx > 1 && byteIdx + 1 < data.Length)
@@ -329,5 +358,119 @@ namespace LexSMS.Helpers
             }
             return result;
         }
+
+        /// <summary>
+        /// 从 PDU 中提取 UDH（用户数据头）信息
+        /// 用于检测和处理长短信
+        /// </summary>
+        public static UdhInfo? ExtractUdhInfo(string pduHex)
+        {
+            try
+            {
+                int pos = 0;
+
+                // SMSC 信息长度
+                int smscLen = Convert.ToInt32(pduHex.Substring(pos, 2), 16);
+                pos += 2 + smscLen * 2;
+
+                // PDU 类型
+                int pduType = Convert.ToInt32(pduHex.Substring(pos, 2), 16);
+                pos += 2;
+                
+                bool hasUdhi = (pduType & 0x40) != 0;
+                
+                if (!hasUdhi)
+                    return null; // 不是长短信
+
+                // 发件人地址长度
+                int oadLen = Convert.ToInt32(pduHex.Substring(pos, 2), 16);
+                pos += 2;
+                pos += 2; // OA Type
+                int oadBytes = (oadLen + 1) / 2;
+                pos += oadBytes * 2;
+
+                // PID, DCS
+                pos += 4;
+
+                // 时间戳
+                pos += 14;
+
+                // 用户数据长度
+                if (pos >= pduHex.Length - 2)
+                    return null;
+                    
+                int udLen = Convert.ToInt32(pduHex.Substring(pos, 2), 16);
+                pos += 2;
+
+                if (pos >= pduHex.Length)
+                    return null;
+
+                // UDH 长度
+                int udhLen = Convert.ToInt32(pduHex.Substring(pos, 2), 16);
+                pos += 2;
+
+                if (udhLen == 0 || pos >= pduHex.Length)
+                    return null;
+
+                // 解析 UDH
+                int udhEnd = pos + udhLen * 2;
+                
+                while (pos < udhEnd && pos < pduHex.Length - 4)
+                {
+                    int iei = Convert.ToInt32(pduHex.Substring(pos, 2), 16);
+                    pos += 2;
+                    int iedl = Convert.ToInt32(pduHex.Substring(pos, 2), 16);
+                    pos += 2;
+
+                    // IEI = 0x00 或 0x08 表示长短信信息
+                    if (iei == 0x00 && iedl == 3 && pos + 6 <= pduHex.Length)
+                    {
+                        // 8位参考号
+                        int refNum = Convert.ToInt32(pduHex.Substring(pos, 2), 16);
+                        int total = Convert.ToInt32(pduHex.Substring(pos + 2, 2), 16);
+                        int part = Convert.ToInt32(pduHex.Substring(pos + 4, 2), 16);
+                        
+                        return new UdhInfo
+                        {
+                            ReferenceNumber = refNum,
+                            TotalParts = total,
+                            PartNumber = part
+                        };
+                    }
+                    else if (iei == 0x08 && iedl == 4 && pos + 8 <= pduHex.Length)
+                    {
+                        // 16位参考号
+                        int refNum = Convert.ToInt32(pduHex.Substring(pos, 4), 16);
+                        int total = Convert.ToInt32(pduHex.Substring(pos + 4, 2), 16);
+                        int part = Convert.ToInt32(pduHex.Substring(pos + 6, 2), 16);
+                        
+                        return new UdhInfo
+                        {
+                            ReferenceNumber = refNum,
+                            TotalParts = total,
+                            PartNumber = part
+                        };
+                    }
+                    
+                    pos += iedl * 2;
+                }
+
+                return null;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+    }
+
+    /// <summary>
+    /// UDH 信息（用户数据头，用于长短信）
+    /// </summary>
+    public class UdhInfo
+    {
+        public int ReferenceNumber { get; set; }
+        public int TotalParts { get; set; }
+        public int PartNumber { get; set; }
     }
 }

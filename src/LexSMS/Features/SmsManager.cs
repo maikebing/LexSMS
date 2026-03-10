@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using LexSMS.Core;
 using LexSMS.Events;
@@ -12,12 +13,19 @@ namespace LexSMS.Features
 {
     /// <summary>
     /// 短信管理器
-    /// 实现中英文短信的发送和接收
+    /// 实现中英文短信的发送和接收，支持长短信自动合并
     /// </summary>
     public class SmsManager
     {
         private readonly AtChannel _channel;
         private string? _pendingCmtHeader;  // 缓存 +CMT 头部，等待下一行 PDU
+        private readonly object _syncRoot = new();
+
+        // 长短信缓冲区: Key = "发送号码_参考号", Value = 片段集合
+        private readonly Dictionary<string, MultipartSmsBuffer> _multipartBuffers = new();
+
+        // 已完成短信的短暂缓冲区：用于把同一时间戳的多组分片短信拼接成一条逻辑短信。
+        private readonly Dictionary<string, PendingSmsDispatch> _pendingDispatches = new();
 
         /// <summary>
         /// 收到新短信事件
@@ -266,7 +274,7 @@ namespace LexSMS.Features
                 if (line.StartsWith("+CMGL:", StringComparison.OrdinalIgnoreCase))
                 {
                     string data = line.Substring(6).Trim();
-                    string[] parts = data.Split(',');
+                    string[] parts = data.Split(",");
                     if (parts.Length < 2) continue;
 
                     if (!int.TryParse(parts[0].Trim(), out int idx)) continue;
@@ -337,24 +345,42 @@ namespace LexSMS.Features
             {
                 try
                 {
+                    System.Diagnostics.Debug.WriteLine($"[SmsManager] 收到 PDU: {urc}");
+                    
                     // 解析 PDU
                     var (phoneNumber, message, timestamp) = PduHelper.DecodePdu(urc);
-
-                    // 触发事件，传递完整的短信信息
-                    var smsMessage = new SmsMessage
+                    
+                    System.Diagnostics.Debug.WriteLine($"[SmsManager] 解析结果 - 号码: {phoneNumber}, 内容长度: {message?.Length ?? 0}");
+                    
+                    // 检查是否是长短信
+                    var udhInfo = PduHelper.ExtractUdhInfo(urc);
+                    
+                    if (udhInfo != null)
                     {
-                        Index = -1,  // 直接推送的短信没有索引
-                        PhoneNumber = phoneNumber,
-                        Content = message,
-                        Timestamp = timestamp,
-                        Status = SmsStatus.ReceivedUnread
-                    };
+                        System.Diagnostics.Debug.WriteLine($"[SmsManager] 检测到长短信 - 参考号: {udhInfo.ReferenceNumber}, 第 {udhInfo.PartNumber}/{udhInfo.TotalParts} 段");
+                        // 处理长短信
+                        ProcessMultipartSms(phoneNumber, message ?? string.Empty, timestamp, udhInfo);
+                    }
+                    else
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[SmsManager] 普通短信（无 UDH）");
+                        
+                        // 普通短信，直接触发事件
+                        var smsMessage = new SmsMessage
+                        {
+                            Index = -1,
+                            PhoneNumber = phoneNumber,
+                            Content = message ?? string.Empty,
+                            Timestamp = timestamp,
+                            Status = SmsStatus.ReceivedUnread
+                        };
 
-                    SmsReceived?.Invoke(this, new SmsReceivedEventArgs(-1, smsMessage));
+                        QueueSmsDispatch(smsMessage);
+                    }
                 }
-                catch (Exception)
+                catch (Exception ex)
                 {
-                    // PDU 解析失败，忽略
+                    System.Diagnostics.Debug.WriteLine($"[SmsManager] PDU 解析失败: {ex.Message}");
                 }
                 finally
                 {
@@ -380,5 +406,220 @@ namespace LexSMS.Features
                 _pendingCmtHeader = urc;
             }
         }
+
+        /// <summary>
+        /// 处理长短信片段
+        /// </summary>
+        private void ProcessMultipartSms(string phoneNumber, string content, DateTime? timestamp, UdhInfo udhInfo)
+        {
+            SmsMessage? completedMessage = null;
+            string bufferKey = BuildMultipartKey(phoneNumber, udhInfo.ReferenceNumber);
+
+            lock (_syncRoot)
+            {
+                if (!_multipartBuffers.TryGetValue(bufferKey, out var buffer))
+                {
+                    buffer = new MultipartSmsBuffer
+                    {
+                        PhoneNumber = phoneNumber,
+                        Timestamp = timestamp,
+                        TotalParts = udhInfo.TotalParts,
+                        ReferenceNumber = udhInfo.ReferenceNumber
+                    };
+                    _multipartBuffers[bufferKey] = buffer;
+                }
+
+                buffer.Parts[udhInfo.PartNumber] = content;
+                buffer.UpdatedAtUtc = DateTime.UtcNow;
+
+                if (buffer.Parts.Count == buffer.TotalParts)
+                {
+                    string mergedContent = MergeMultipartSms(buffer);
+                    _multipartBuffers.Remove(bufferKey);
+                    completedMessage = CreateSmsMessage(phoneNumber, mergedContent, timestamp);
+                }
+            }
+
+            if (completedMessage != null)
+            {
+                QueueSmsDispatch(completedMessage);
+            }
+        }
+
+        /// <summary>
+        /// 合并长短信的所有片段
+        /// </summary>
+        private string MergeMultipartSms(MultipartSmsBuffer buffer)
+        {
+            var sb = new StringBuilder();
+            for (int i = 1; i <= buffer.TotalParts; i++)
+            {
+                if (buffer.Parts.TryGetValue(i, out var part))
+                {
+                    sb.Append(part);
+                }
+            }
+            return sb.ToString();
+        }
+
+        private void QueueSmsDispatch(SmsMessage smsMessage)
+        {
+            PendingSmsDispatch? previousDispatch = null;
+
+            lock (_syncRoot)
+            {
+                string dispatchKey = BuildDispatchKey(smsMessage.PhoneNumber, smsMessage.Timestamp);
+
+                if (_pendingDispatches.TryGetValue(dispatchKey, out var pendingDispatch))
+                {
+                    if (TryCombineMessages(pendingDispatch.Message.Content, smsMessage.Content, out var combinedContent))
+                    {
+                        pendingDispatch.Message.Content = combinedContent;
+                        pendingDispatch.Timer.Change(TimeSpan.FromSeconds(4), Timeout.InfiniteTimeSpan);
+                        return;
+                    }
+
+                    _pendingDispatches.Remove(dispatchKey);
+                    pendingDispatch.Timer.Dispose();
+                    previousDispatch = pendingDispatch;
+                }
+
+                var newDispatch = new PendingSmsDispatch(dispatchKey, smsMessage);
+                newDispatch.Timer = new Timer(OnDispatchTimerElapsed, newDispatch, TimeSpan.FromSeconds(4), Timeout.InfiniteTimeSpan);
+                _pendingDispatches[dispatchKey] = newDispatch;
+            }
+
+            if (previousDispatch != null)
+            {
+                EmitSmsReceived(previousDispatch.Message);
+            }
+        }
+
+        private void OnDispatchTimerElapsed(object? state)
+        {
+            if (state is not PendingSmsDispatch dispatch)
+            {
+                return;
+            }
+
+            SmsMessage? messageToEmit = null;
+
+            lock (_syncRoot)
+            {
+                if (_pendingDispatches.TryGetValue(dispatch.Key, out var currentDispatch) && ReferenceEquals(currentDispatch, dispatch))
+                {
+                    _pendingDispatches.Remove(dispatch.Key);
+                    currentDispatch.Timer.Dispose();
+                    messageToEmit = currentDispatch.Message;
+                }
+            }
+
+            if (messageToEmit != null)
+            {
+                EmitSmsReceived(messageToEmit);
+            }
+        }
+
+        private void EmitSmsReceived(SmsMessage smsMessage)
+        {
+            SmsReceived?.Invoke(this, new SmsReceivedEventArgs(-1, smsMessage));
+        }
+
+        private static SmsMessage CreateSmsMessage(string phoneNumber, string content, DateTime? timestamp)
+        {
+            return new SmsMessage
+            {
+                Index = -1,
+                PhoneNumber = phoneNumber,
+                Content = content,
+                Timestamp = timestamp,
+                Status = SmsStatus.ReceivedUnread
+            };
+        }
+
+        private static string BuildMultipartKey(string phoneNumber, int referenceNumber)
+        {
+            return $"{NormalizePhoneNumber(phoneNumber)}_{referenceNumber}";
+        }
+
+        private static string BuildDispatchKey(string? phoneNumber, DateTime? timestamp)
+        {
+            string normalizedPhoneNumber = NormalizePhoneNumber(phoneNumber);
+            string normalizedTimestamp = timestamp?.ToUniversalTime().ToString("yyyyMMddHHmmss") ?? "none";
+            return $"{normalizedPhoneNumber}_{normalizedTimestamp}";
+        }
+
+        private static string NormalizePhoneNumber(string? phoneNumber)
+        {
+            return string.IsNullOrWhiteSpace(phoneNumber) ? string.Empty : phoneNumber.TrimStart('+');
+        }
+
+        private static bool TryCombineMessages(string? existingContent, string? nextContent, out string combinedContent)
+        {
+            combinedContent = string.Empty;
+
+            if (string.IsNullOrEmpty(existingContent) || string.IsNullOrEmpty(nextContent))
+            {
+                return false;
+            }
+
+            if (LooksLikeLeadingText(existingContent) && LooksLikeTrailingUrl(nextContent))
+            {
+                combinedContent = string.Concat(existingContent, nextContent);
+                return true;
+            }
+
+            if (LooksLikeLeadingText(nextContent) && LooksLikeTrailingUrl(existingContent))
+            {
+                combinedContent = string.Concat(nextContent, existingContent);
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool LooksLikeLeadingText(string content)
+        {
+            return content.EndsWith("：", StringComparison.Ordinal) ||
+                   content.EndsWith(":", StringComparison.Ordinal) ||
+                   content.EndsWith("链接", StringComparison.Ordinal) ||
+                   content.EndsWith("查阅", StringComparison.Ordinal) ||
+                   content.EndsWith("查阅：", StringComparison.Ordinal);
+        }
+
+        private static bool LooksLikeTrailingUrl(string content)
+        {
+            return content.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                   content.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
+                   content.StartsWith("www.", StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    /// <summary>
+    /// 长短信缓冲区
+    /// </summary>
+    internal class MultipartSmsBuffer
+    {
+        public string PhoneNumber { get; set; } = string.Empty;
+        public DateTime? Timestamp { get; set; }
+        public int TotalParts { get; set; }
+        public int ReferenceNumber { get; set; }
+        public DateTime UpdatedAtUtc { get; set; }
+        public Dictionary<int, string> Parts { get; } = new();
+    }
+
+    internal sealed class PendingSmsDispatch
+    {
+        public PendingSmsDispatch(string key, SmsMessage message)
+        {
+            Key = key;
+            Message = message;
+        }
+
+        public string Key { get; }
+
+        public SmsMessage Message { get; }
+
+        public Timer Timer { get; set; } = null!;
     }
 }
