@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.IO.Ports;
 using System.Text;
 using System.Threading;
@@ -21,6 +22,7 @@ namespace LexSMS.Core
         private readonly ConcurrentQueue<string> _unsolicitedQueue = new ConcurrentQueue<string>();
         private TaskCompletionSource<AtResponse>? _pendingResponse;
         private readonly List<string> _currentResponseLines = new List<string>();
+        private bool _suspendDataReceivedProcessing;
         private bool _disposed;
 
         /// <summary>
@@ -73,14 +75,14 @@ namespace LexSMS.Core
         /// </summary>
         /// <param name="command">AT命令</param>
         /// <param name="timeoutMs">超时毫秒数，0 表示使用配置默认值</param>
-        public async Task<AtResponse> SendCommandAsync(string command, int timeoutMs = 0)
+        public async Task<AtResponse> SendCommandAsync(string command, int timeoutMs = 0, CancellationToken cancellationToken = default)
         {
             if (!_serialPort.IsOpen)
                 throw new ModemException("串口未打开");
 
             int timeout = timeoutMs > 0 ? timeoutMs : _config.CommandTimeoutMs;
 
-            await _commandLock.WaitAsync();
+            await _commandLock.WaitAsync(cancellationToken);
             try
             {
                 _currentResponseLines.Clear();
@@ -90,10 +92,18 @@ namespace LexSMS.Core
                 byte[] bytes = Encoding.ASCII.GetBytes(cmdToSend);
                 _serialPort.Write(bytes, 0, bytes.Length);
 
-                using var cts = new CancellationTokenSource(timeout);
-                cts.Token.Register(() =>
+                using var timeoutCts = new CancellationTokenSource(timeout);
+                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token, cancellationToken);
+                linkedCts.Token.Register(() =>
                 {
-                    _pendingResponse?.TrySetException(new AtCommandTimeoutException(command));
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        _pendingResponse?.TrySetCanceled(cancellationToken);
+                    }
+                    else
+                    {
+                        _pendingResponse?.TrySetException(new AtCommandTimeoutException(command));
+                    }
                 });
 
                 return await _pendingResponse.Task;
@@ -136,8 +146,73 @@ namespace LexSMS.Core
             _serialPort.Write(new byte[] { 0x1B }, 0, 1);
         }
 
+        internal async Task<byte[]> SendCommandForBinaryPayloadAsync(string command, string responsePrefix, int timeoutMs = 0, CancellationToken cancellationToken = default)
+        {
+            if (!_serialPort.IsOpen)
+                throw new ModemException("串口未打开");
+
+            if (string.IsNullOrWhiteSpace(command))
+                throw new ArgumentException("命令不能为空", nameof(command));
+
+            if (string.IsNullOrWhiteSpace(responsePrefix))
+                throw new ArgumentException("响应前缀不能为空", nameof(responsePrefix));
+
+            int timeout = timeoutMs > 0 ? timeoutMs : _config.CommandTimeoutMs;
+
+            await _commandLock.WaitAsync(cancellationToken);
+            _suspendDataReceivedProcessing = true;
+            int originalReadTimeout = _serialPort.ReadTimeout;
+
+            try
+            {
+                _receiveBuffer.Clear();
+                _currentResponseLines.Clear();
+                _pendingResponse = null;
+                _serialPort.ReadTimeout = 250;
+
+                using var timeoutCts = new CancellationTokenSource(timeout);
+                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token, cancellationToken);
+
+                string cmdToSend = command.EndsWith("\r\n") ? command : command + "\r\n";
+                byte[] commandBytes = Encoding.ASCII.GetBytes(cmdToSend);
+                _serialPort.Write(commandBytes, 0, commandBytes.Length);
+
+                while (true)
+                {
+                    string line = ReadAsciiLine(linkedCts.Token);
+                    if (string.IsNullOrEmpty(line))
+                        continue;
+
+                    if (line.StartsWith(responsePrefix, StringComparison.OrdinalIgnoreCase))
+                    {
+                        int payloadLength = ParsePayloadLength(line, responsePrefix);
+                        byte[] directPayload = ReadExactly(payloadLength, linkedCts.Token);
+                        TryConsumeBinaryResponseTerminator(command, cancellationToken);
+                        return directPayload;
+                    }
+
+                    if (IsErrorResponseLine(line))
+                        throw new AtCommandErrorException(command, line);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                throw new AtCommandTimeoutException(command);
+            }
+            finally
+            {
+                _serialPort.ReadTimeout = originalReadTimeout;
+                _suspendDataReceivedProcessing = false;
+                _commandLock.Release();
+            }
+        }
+
         private void OnDataReceived(object sender, SerialDataReceivedEventArgs e)
         {
+            if (_suspendDataReceivedProcessing)
+                return;
+
             try
             {
                 string data = _serialPort.ReadExisting();
@@ -218,6 +293,116 @@ namespace LexSMS.Core
                    line == "NO DIALTONE" ||
                    line == "CONNECT" ||
                    line.StartsWith("CONNECT ", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsErrorResponseLine(string line)
+        {
+            return line == "ERROR" ||
+                   line.StartsWith("+CME ERROR:", StringComparison.OrdinalIgnoreCase) ||
+                   line.StartsWith("+CMS ERROR:", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static int ParsePayloadLength(string line, string responsePrefix)
+        {
+            string payload = line.Substring(responsePrefix.Length).Trim();
+            if (!int.TryParse(payload, out int payloadLength) || payloadLength < 0)
+                throw new InvalidDataException($"无法解析二进制响应长度: {line}");
+
+            return payloadLength;
+        }
+
+        private void TryConsumeBinaryResponseTerminator(string command, CancellationToken cancellationToken)
+        {
+            using var graceCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            graceCts.CancelAfter(1000);
+
+            try
+            {
+                while (true)
+                {
+                    string line = ReadAsciiLine(graceCts.Token);
+                    if (string.IsNullOrEmpty(line))
+                        continue;
+
+                    if (line == "OK")
+                        return;
+
+                    if (IsErrorResponseLine(line))
+                        throw new AtCommandErrorException(command, line);
+                }
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+            }
+        }
+
+        private string ReadAsciiLine(CancellationToken cancellationToken)
+        {
+            var bytes = new List<byte>();
+
+            while (true)
+            {
+                byte current = ReadByte(cancellationToken);
+                if (current == '\r')
+                {
+                    byte next = ReadByte(cancellationToken);
+                    if (next == '\n')
+                        break;
+
+                    bytes.Add(current);
+                    bytes.Add(next);
+                    continue;
+                }
+
+                bytes.Add(current);
+            }
+
+            return Encoding.ASCII.GetString(bytes.ToArray()).Trim();
+        }
+
+        private byte[] ReadExactly(int length, CancellationToken cancellationToken)
+        {
+            byte[] buffer = new byte[length];
+            int offset = 0;
+
+            while (offset < length)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                try
+                {
+                    int read = _serialPort.Read(buffer, offset, length - offset);
+                    if (read <= 0)
+                        throw new EndOfStreamException("串口在读取二进制负载时意外结束");
+
+                    offset += read;
+                }
+                catch (TimeoutException)
+                {
+                }
+            }
+
+            return buffer;
+        }
+
+        private byte ReadByte(CancellationToken cancellationToken)
+        {
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                try
+                {
+                    int value = _serialPort.ReadByte();
+                    if (value < 0)
+                        throw new EndOfStreamException("串口在读取字节时意外结束");
+
+                    return (byte)value;
+                }
+                catch (TimeoutException)
+                {
+                }
+            }
         }
 
         private static AtResponse BuildResponse(List<string> lines)

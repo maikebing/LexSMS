@@ -1,4 +1,6 @@
 using System;
+using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 using LexSMS.Core;
 using LexSMS.Events;
@@ -122,7 +124,11 @@ namespace LexSMS
             _channel = new AtChannel(config);
             _callManager = new CallManager(_channel);
             _smsManager = new SmsManager(_channel);
-            _httpClient = new ModemHttpClient(_channel);
+            _httpClient = new ModemHttpClient(_channel)
+            {
+                DebugLogOutput = LogDebug,
+                WarningLogOutput = LogWarning
+            };
             _mqttClient = new ModemMqttClient(_channel);
             _locationManager = new LocationManager(_channel);
             _statusManager = new StatusManager(_channel);
@@ -464,9 +470,10 @@ namespace LexSMS
         /// 通过模块发起HTTP GET请求
         /// </summary>
         /// <param name="url">请求URL（支持HTTP/HTTPS）</param>
+        /// <param name="cancellationToken">取消令牌</param>
         /// <returns>HTTP响应</returns>
-        public Task<HttpResponse> HttpGetAsync(string url)
-            => _httpClient.GetAsync(url);
+        public Task<HttpResponse> HttpGetAsync(string url, CancellationToken cancellationToken = default)
+            => _httpClient.GetAsync(url, cancellationToken);
 
         /// <summary>
         /// 通过模块发起HTTP POST请求
@@ -474,24 +481,64 @@ namespace LexSMS
         /// <param name="url">请求URL</param>
         /// <param name="body">请求体内容</param>
         /// <param name="contentType">Content-Type，默认 application/json</param>
+        /// <param name="cancellationToken">取消令牌</param>
         /// <returns>HTTP响应</returns>
-        public Task<HttpResponse> HttpPostAsync(string url, string body, string contentType = "application/json")
-            => _httpClient.PostAsync(url, body, contentType);
+        public Task<HttpResponse> HttpPostAsync(string url, string body, string contentType = "application/json", CancellationToken cancellationToken = default)
+            => _httpClient.PostAsync(url, body, contentType, cancellationToken);
 
         /// <summary>
         /// 读取HTTP响应头（使用AT+HTTPHEAD）
         /// </summary>
         /// <param name="url">请求URL</param>
+        /// <param name="cancellationToken">取消令牌</param>
         /// <returns>HTTP响应（Headers属性包含响应头内容）</returns>
-        public Task<HttpResponse> HttpGetHeadersAsync(string url)
-            => _httpClient.GetHeadersAsync(url);
+        public Task<HttpResponse> HttpGetHeadersAsync(string url, CancellationToken cancellationToken = default)
+            => _httpClient.GetHeadersAsync(url, cancellationToken);
 
         /// <summary>
         /// 通过模块发起HTTP请求（完整版本）
         /// </summary>
         public Task<HttpResponse> HttpRequestAsync(string url, Models.HttpMethod method = Models.HttpMethod.GET,
-            string? body = null, string contentType = "application/json")
-            => _httpClient.RequestAsync(url, method, body, contentType);
+            string? body = null, string contentType = "application/json", CancellationToken cancellationToken = default)
+            => _httpClient.RequestAsync(url, method, body, contentType, cancellationToken);
+
+        /// <summary>
+        /// 通过模块下载HTTP文件到本地磁盘
+        /// </summary>
+        /// <param name="url">文件URL</param>
+        /// <param name="localFilePath">本地磁盘文件路径</param>
+        /// <param name="readChunkSize">单次读取块大小，默认 1024 字节</param>
+        /// <param name="cancellationToken">取消令牌</param>
+        public Task<HttpResponse> HttpDownloadFileAsync(string url, string localFilePath, int readChunkSize = 1024, CancellationToken cancellationToken = default)
+            => _httpClient.DownloadFileAsync(url, localFilePath, readChunkSize, cancellationToken);
+
+        /// <summary>
+        /// 通过模块下载HTTP内容到可写入流（支持大文件）
+        /// </summary>
+        /// <param name="url">文件URL</param>
+        /// <param name="destination">目标流（由调用方负责释放）</param>
+        /// <param name="readChunkSize">单次读取块大小，默认 1024 字节</param>
+        /// <param name="cancellationToken">取消令牌</param>
+        public Task<HttpResponse> HttpDownloadToStreamAsync(string url, Stream destination, int readChunkSize = 1024, CancellationToken cancellationToken = default)
+            => _httpClient.DownloadToStreamAsync(url, destination, readChunkSize, cancellationToken);
+
+        /// <summary>
+        /// 通过模块下载HTTP内容到内存流（Position 已重置到 0）
+        /// </summary>
+        /// <param name="url">文件URL</param>
+        /// <param name="readChunkSize">单次读取块大小，默认 1024 字节</param>
+        /// <param name="cancellationToken">取消令牌</param>
+        public Task<MemoryStream> HttpDownloadToMemoryStreamAsync(string url, int readChunkSize = 1024, CancellationToken cancellationToken = default)
+            => _httpClient.DownloadToMemoryStreamAsync(url, readChunkSize, cancellationToken);
+
+        /// <summary>
+        /// 通过模块下载HTTP内容到字节数组缓冲区
+        /// </summary>
+        /// <param name="url">文件URL</param>
+        /// <param name="readChunkSize">单次读取块大小，默认 1024 字节</param>
+        /// <param name="cancellationToken">取消令牌</param>
+        public Task<byte[]> HttpDownloadToBufferAsync(string url, int readChunkSize = 1024, CancellationToken cancellationToken = default)
+            => _httpClient.DownloadToBufferAsync(url, readChunkSize, cancellationToken);
 
         #endregion
 

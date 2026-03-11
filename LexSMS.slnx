@@ -2,6 +2,7 @@
   <Folder Name="/samples/">
     <Project Path="samples/DiagnosticExample/DiagnosticExample.csproj" />
     <Project Path="samples/GprsAttachExample/GprsAttachExample.csproj" />
+    <Project Path="samples/HttpDownloadExample/HttpDownloadExample.csproj" />
     <Project Path="samples/NetworkDebugExample/NetworkDebugExample.csproj" />
     <Project Path="samples/ReceiveSmsExample/ReceiveSmsExample.csproj" />
     <Project Path="samples/SendSmsExample/SendSmsExample.csproj" />

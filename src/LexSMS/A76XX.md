@@ -404,11 +404,42 @@ UDP 指令与 TCP 类似，但 `AT+CIPOPEN` 参数不同：
 - **示例**：`AT+HTTPACTION=0`
 - **响应**：执行后返回 `+HTTPACTION: <method>,<status_code>,<data_len>`。
 
-### 9.4 AT+HTTPREAD —— 读取 HTTP 响应
-- **功能**：读取服务器返回的数据。
+### 9.4 AT+HTTPREAD —— 分块读取 HTTP 响应体
+- **功能**：逐块读取服务器返回的数据，每次指定偏移和块大小。
 - **格式**：`AT+HTTPREAD=<offset>,<length>`
-- **示例**：`AT+HTTPREAD=0,500`
-- **响应**：返回 `+HTTPREAD: <length>` 及数据内容。
+  - `<offset>`：本次读取的起始字节偏移（首次为 0）。
+  - `<length>`：本次请求读取的字节数（建议 ≤ 2048）。
+- **单次响应格式**：
+  ```
+  +HTTPREAD: <actual_length>
+  <actual_length 字节的二进制数据>
+  OK
+  ```
+- **结束标志**：当 `<actual_length>` 为 `0` 时表示数据已读完：
+  ```
+  +HTTPREAD: 0
+  OK
+  ```
+- **下载循环示例**（总长 11363 字节，每块 1024 字节）：
+  ```
+  -> AT+HTTPREAD=0,1024
+  <- +HTTPREAD: 1024  <1024 字节数据>  OK
+
+  -> AT+HTTPREAD=1024,1024
+  <- +HTTPREAD: 1024  <1024 字节数据>  OK
+
+  ...（重复直到剩余不足一块）...
+
+  -> AT+HTTPREAD=11264,1024
+  <- +HTTPREAD: 99  <99 字节数据>  OK
+
+  -> AT+HTTPREAD=11363,1024
+  <- +HTTPREAD: 0  OK          ← 数据读完
+  ```
+- **说明**：
+  - `<actual_length>` 可能小于请求的 `<length>`（最后一块），需按实际值推进偏移。
+  - 超时时间建议按块大小计算：基础 60 秒 + 每 1 KB 增加 30 秒，最大 10 分钟。
+  - 必须在 `AT+HTTPACTION` 成功并收到 `+HTTPACTION` URC 后才能调用。
 
 ### 9.5 AT+HTTPHEAD —— 读取响应头
 - **功能**：读取 HTTP 响应头信息。

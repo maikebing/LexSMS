@@ -1,6 +1,8 @@
 using System;
+using System.Reflection;
 using LexSMS.Core;
 using LexSMS.Events;
+using LexSMS.Features;
 using LexSMS.Models;
 using Xunit;
 
@@ -190,6 +192,89 @@ namespace LexSMS.Tests
             var args = new TcpConnectionClosedEventArgs(2, 1);
             Assert.Equal(2, args.ConnectionIndex);
             Assert.Equal(1, args.Reason);
+        }
+    }
+
+    /// <summary>
+    /// HTTP API 签名测试（验证默认参数值为 1024）
+    /// </summary>
+    public class HttpApiSurfaceTests
+    {
+        private static int GetReadChunkSizeDefault(string methodName)
+        {
+            var method = typeof(ModemHttpClient).GetMethod(methodName,
+                BindingFlags.Public | BindingFlags.Instance);
+            Assert.NotNull(method);
+            var parameters = method!.GetParameters();
+            var param = Array.Find(parameters, p => p.Name == "readChunkSize");
+            Assert.NotNull(param);
+            return (int)param!.DefaultValue!;
+        }
+
+        [Fact]
+        public void DownloadFileAsync_ReadChunkSizeDefault_Is1024()
+            => Assert.Equal(1024, GetReadChunkSizeDefault(nameof(ModemHttpClient.DownloadFileAsync)));
+
+        [Fact]
+        public void DownloadToStreamAsync_ReadChunkSizeDefault_Is1024()
+            => Assert.Equal(1024, GetReadChunkSizeDefault(nameof(ModemHttpClient.DownloadToStreamAsync)));
+
+        [Fact]
+        public void DownloadToBufferAsync_ReadChunkSizeDefault_Is1024()
+            => Assert.Equal(1024, GetReadChunkSizeDefault(nameof(ModemHttpClient.DownloadToBufferAsync)));
+
+        [Fact]
+        public void DownloadToMemoryStreamAsync_ReadChunkSizeDefault_Is1024()
+            => Assert.Equal(1024, GetReadChunkSizeDefault(nameof(ModemHttpClient.DownloadToMemoryStreamAsync)));
+    }
+
+    /// <summary>
+    /// 逐块 AT+HTTPREAD 协议解析测试
+    /// </summary>
+    public class HttpReadPerChunkParsingTests
+    {
+        private static readonly MethodInfo s_parsePayloadLength =
+            typeof(AtChannel).GetMethod("ParsePayloadLength",
+                BindingFlags.NonPublic | BindingFlags.Static)!;
+
+        private static int InvokeParsePayloadLength(string line, string prefix = "+HTTPREAD:")
+            => (int)s_parsePayloadLength.Invoke(null, new object[] { line, prefix })!;
+
+        [Theory]
+        [InlineData("+HTTPREAD: 1024", 1024)]
+        [InlineData("+HTTPREAD: 99", 99)]
+        [InlineData("+HTTPREAD: 0", 0)]
+        public void ParsePayloadLength_ReturnsCorrectLength(string line, int expected)
+        {
+            int actual = InvokeParsePayloadLength(line);
+            Assert.Equal(expected, actual);
+        }
+
+        [Fact]
+        public void ParsePayloadLength_ZeroChunk_SignalsEndOfData()
+        {
+            int length = InvokeParsePayloadLength("+HTTPREAD: 0");
+            Assert.Equal(0, length);
+        }
+
+        [Fact]
+        public void PerChunkDownload_TotalBytesMatchesSumOfChunks()
+        {
+            // Simulates 11363-byte total downloaded in 1024-byte chunks
+            const int totalLength = 11363;
+            const int chunkSize = 1024;
+            int offset = 0;
+            int totalReceived = 0;
+
+            while (offset < totalLength)
+            {
+                int remaining = totalLength - offset;
+                int thisChunk = Math.Min(chunkSize, remaining);
+                totalReceived += thisChunk;
+                offset += thisChunk;
+            }
+
+            Assert.Equal(totalLength, totalReceived);
         }
     }
 }

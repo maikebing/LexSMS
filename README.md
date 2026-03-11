@@ -112,6 +112,9 @@ var postResp = await modem.HttpPostAsync(
     "application/json");
 ```
 
+完整的 HTTP 文件下载示例见 `samples/HttpDownloadExample`。
+该示例会先访问 `https://www.microsoft.com/`，再通过模块 HTTP 分块读取 `https://uhf.microsoft.com/images/microsoft/RE1Mu3b.png`，并保存到本地磁盘。
+
 ### MQTT
 
 ```csharp
