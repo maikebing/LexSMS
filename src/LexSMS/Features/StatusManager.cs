@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.Threading.Tasks;
 using LexSMS.Core;
 using LexSMS.Exceptions;
@@ -428,6 +429,165 @@ namespace LexSMS.Features
         public async Task ResetAsync()
         {
             await _channel.SendCommandAsync("AT+CRESET", 5000);
+        }
+
+        /// <summary>
+        /// 查询模块当前时间（AT+CCLK?）
+        /// </summary>
+        /// <returns>模块时钟时间，解析失败返回 null</returns>
+        public async Task<DateTimeOffset?> GetModuleClockAsync()
+        {
+            var resp = await _channel.SendCommandAsync("AT+CCLK?");
+            if (!resp.IsOk)
+            {
+                return null;
+            }
+
+            foreach (var line in resp.Lines)
+            {
+                if (!line.StartsWith("+CCLK:", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var rawClock = line.Substring(6).Trim().Trim('"');
+                if (TryParseModuleClock(rawClock, out var clock))
+                {
+                    return clock;
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// 执行 NTP 网络时间同步（AT+CNTP）
+        /// </summary>
+        /// <returns>同步结果，包含状态码和错误信息</returns>
+        public async Task<NtpSyncResult> SyncNetworkTimeAsync()
+        {
+            // CNTP 执行可能涉及网络交互，预留更长超时
+            var resp = await _channel.SendCommandAsync("AT+CNTP", 65000);
+            var result = new NtpSyncResult();
+
+            if (resp.IsError)
+            {
+                result.ErrorMessage = resp.ErrorMessage;
+                return result;
+            }
+
+            if (!resp.IsOk)
+            {
+                result.ErrorMessage = "AT+CNTP 未返回成功响应";
+                return result;
+            }
+
+            foreach (var line in resp.Lines)
+            {
+                if (!line.StartsWith("+CNTP:", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var data = line.Substring(6).Trim();
+                if (!int.TryParse(data, NumberStyles.Integer, CultureInfo.InvariantCulture, out var code))
+                {
+                    result.ErrorMessage = $"无法解析 CNTP 返回码: {data}";
+                    return result;
+                }
+
+                result.RawCode = code;
+                result.Status = MapNtpStatus(code);
+                return result;
+            }
+
+            result.ErrorMessage = "未收到 +CNTP 返回行";
+            return result;
+        }
+
+        private static NtpSyncStatus MapNtpStatus(int code)
+        {
+            return code switch
+            {
+                0 or 1 => NtpSyncStatus.Success,
+                61 => NtpSyncStatus.NetworkError,
+                62 => NtpSyncStatus.DnsResolveError,
+                63 => NtpSyncStatus.ConnectionError,
+                64 => NtpSyncStatus.ServerResponseError,
+                65 => NtpSyncStatus.ServerResponseTimeout,
+                _ => NtpSyncStatus.Unknown
+            };
+        }
+
+        private static bool TryParseModuleClock(string value, out DateTimeOffset clock)
+        {
+            clock = default;
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+
+            var parts = value.Split(',', 2);
+            if (parts.Length != 2)
+            {
+                return false;
+            }
+
+            if (!DateTime.TryParseExact(parts[0], "yy/MM/dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var datePart))
+            {
+                return false;
+            }
+
+            if (parts[1].Length < 8)
+            {
+                return false;
+            }
+
+            var timePart = parts[1][..8];
+            if (!TimeSpan.TryParseExact(timePart, "hh\\:mm\\:ss", CultureInfo.InvariantCulture, out var timeOfDay))
+            {
+                return false;
+            }
+
+            var offsetPart = parts[1].Length > 8 ? parts[1][8..] : "+00";
+            if (!TryParseQuarterHourOffset(offsetPart, out var offset))
+            {
+                return false;
+            }
+
+            var localDateTime = new DateTime(datePart.Year, datePart.Month, datePart.Day,
+                timeOfDay.Hours, timeOfDay.Minutes, timeOfDay.Seconds, DateTimeKind.Unspecified);
+            clock = new DateTimeOffset(localDateTime, offset);
+            return true;
+        }
+
+        private static bool TryParseQuarterHourOffset(string value, out TimeSpan offset)
+        {
+            offset = default;
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+
+            var sign = value[0];
+            if (sign != '+' && sign != '-')
+            {
+                return false;
+            }
+
+            if (!int.TryParse(value[1..], NumberStyles.Integer, CultureInfo.InvariantCulture, out var quarterHours))
+            {
+                return false;
+            }
+
+            var totalMinutes = quarterHours * 15;
+            if (sign == '-')
+            {
+                totalMinutes *= -1;
+            }
+
+            offset = TimeSpan.FromMinutes(totalMinutes);
+            return true;
         }
     }
 }

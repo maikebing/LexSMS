@@ -42,8 +42,23 @@ namespace LexSMS.Models
         public int CellId { get; set; }
 
         /// <summary>
+        /// 基站定位地址（AT+CLBS=2 返回）
+        /// </summary>
+        public string? Address { get; set; }
+
+        /// <summary>
         /// 定位是否有效
         /// </summary>
         public bool IsValid { get; set; }
+
+        /// <summary>
+        /// 国家名称（根据 MCC 解析）
+        /// </summary>
+        public string? CountryName { get; set; }
+
+        /// <summary>
+        /// 运营商名称（根据 MCC/MNC 解析）
+        /// </summary>
+        public string? OperatorName { get; set; }
     }
 }

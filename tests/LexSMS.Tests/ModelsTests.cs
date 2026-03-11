@@ -187,5 +187,35 @@ namespace LexSMS.Tests
         }
 
         #endregion
+
+        #region NtpSyncResult 测试
+
+        [Fact]
+        public void NtpSyncResult_IsSuccess_ReturnsTrue_WhenStatusIsSuccess()
+        {
+            var result = new NtpSyncResult { Status = NtpSyncStatus.Success };
+            Assert.True(result.IsSuccess);
+        }
+
+        [Fact]
+        public void NtpSyncResult_IsSuccess_ReturnsFalse_WhenStatusIsNetworkError()
+        {
+            var result = new NtpSyncResult { Status = NtpSyncStatus.NetworkError };
+            Assert.False(result.IsSuccess);
+        }
+
+        [Fact]
+        public void NtpSyncStatus_Success_Code_IsOne()
+        {
+            Assert.Equal(1, (int)NtpSyncStatus.Success);
+        }
+
+        [Fact]
+        public void NtpSyncStatus_NetworkError_Code_IsSixtyOne()
+        {
+            Assert.Equal(61, (int)NtpSyncStatus.NetworkError);
+        }
+
+        #endregion
     }
 }

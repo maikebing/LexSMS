@@ -598,6 +598,30 @@ namespace LexSMS
             => _locationManager.GetCellLocationAsync();
 
         /// <summary>
+        /// 获取 GPS 定位信息（AT+CGPSINFO）
+        /// </summary>
+        /// <returns>GPS 定位结果，包含经纬度、UTC 时间和海拔</returns>
+        public Task<GpsLocation> GetGpsLocationAsync()
+            => _locationManager.GetGpsLocationAsync();
+
+        /// <summary>
+        /// 获取基站定位地址信息（AT+CLBS=2）
+        /// </summary>
+        /// <returns>定位地址结果</returns>
+        public Task<CellLocation> GetCellAddressAsync()
+            => _locationManager.GetCellAddressAsync();
+
+        /// <summary>
+        /// 获取完整的基站定位信息（合并经纬度、地址等）
+        /// 依次执行 AT+CLBS=1（经纬度）、AT+CLBS=2（地址）、AT+CLBS=4（扩展信息）
+        /// </summary>
+        /// <param name="includeAddress">是否包含地址查询（AT+CLBS=2），默认 true</param>
+        /// <param name="includeExtended">是否包含扩展查询（AT+CLBS=4），默认 false</param>
+        /// <returns>包含所有查询信息的定位结果</returns>
+        public Task<CellLocation> GetCompleteCellLocationAsync(bool includeAddress = true, bool includeExtended = false)
+            => _locationManager.GetCompleteCellLocationAsync(includeAddress, includeExtended);
+
+        /// <summary>
         /// 获取当前基站信息（MCC/MNC/LAC/CellID）
         /// </summary>
         public Task<CellLocation> GetCellInfoAsync()
@@ -656,6 +680,20 @@ namespace LexSMS
         /// <returns>IP 地址字符串，查询失败返回 null</returns>
         public Task<string?> GetIpAddressAsync()
             => _statusManager.GetIpAddressAsync();
+
+        /// <summary>
+        /// 查询模块当前时间（AT+CCLK?）
+        /// </summary>
+        /// <returns>模块时钟时间，解析失败返回 null</returns>
+        public Task<DateTimeOffset?> GetModuleClockAsync()
+            => _statusManager.GetModuleClockAsync();
+
+        /// <summary>
+        /// 执行 NTP 网络时间同步（AT+CNTP）
+        /// </summary>
+        /// <returns>同步结果，包含状态码和错误信息</returns>
+        public Task<NtpSyncResult> SyncNetworkTimeAsync()
+            => _statusManager.SyncNetworkTimeAsync();
 
         /// <summary>
         /// 重置模块
