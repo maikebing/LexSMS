@@ -462,47 +462,74 @@ namespace LexSMS.Features
 
         /// <summary>
         /// 执行 NTP 网络时间同步（AT+CNTP）
+        /// 注意：AT+CNTP 是异步命令，发送后立即返回 OK，同步完成后模块会主动上报 +CNTP: <code>
         /// </summary>
         /// <returns>同步结果，包含状态码和错误信息</returns>
         public async Task<NtpSyncResult> SyncNetworkTimeAsync()
         {
-            // CNTP 执行可能涉及网络交互，预留更长超时
-            var resp = await _channel.SendCommandAsync("AT+CNTP", 65000);
             var result = new NtpSyncResult();
+            var tcs = new TaskCompletionSource<int>();
+            var timeout = TimeSpan.FromSeconds(65);
 
-            if (resp.IsError)
+            // 注册 URC 处理器，等待 +CNTP: 响应
+            void handler(object? sender, string urc)
             {
-                result.ErrorMessage = resp.ErrorMessage;
-                return result;
-            }
-
-            if (!resp.IsOk)
-            {
-                result.ErrorMessage = "AT+CNTP 未返回成功响应";
-                return result;
-            }
-
-            foreach (var line in resp.Lines)
-            {
-                if (!line.StartsWith("+CNTP:", StringComparison.OrdinalIgnoreCase))
+                if (urc.StartsWith("+CNTP:", StringComparison.OrdinalIgnoreCase))
                 {
-                    continue;
+                    var data = urc.Substring(6).Trim();
+                    if (int.TryParse(data, NumberStyles.Integer, CultureInfo.InvariantCulture, out var code))
+                    {
+                        tcs.TrySetResult(code);
+                    }
+                    else
+                    {
+                        tcs.TrySetException(new FormatException($"无法解析 CNTP 返回码: {data}"));
+                    }
                 }
+            }
 
-                var data = line.Substring(6).Trim();
-                if (!int.TryParse(data, NumberStyles.Integer, CultureInfo.InvariantCulture, out var code))
+            _channel.UnsolicitedReceived += handler;
+
+            try
+            {
+                // 发送命令，应该立即返回 OK
+                var resp = await _channel.SendCommandAsync("AT+CNTP", 5000);
+                
+                if (resp.IsError)
                 {
-                    result.ErrorMessage = $"无法解析 CNTP 返回码: {data}";
+                    result.ErrorMessage = resp.ErrorMessage;
                     return result;
                 }
 
+                if (!resp.IsOk)
+                {
+                    result.ErrorMessage = "AT+CNTP 未返回成功响应";
+                    return result;
+                }
+
+                // 等待 URC 响应或超时
+                var completed = await Task.WhenAny(tcs.Task, Task.Delay(timeout));
+                
+                if (completed != tcs.Task)
+                {
+                    result.ErrorMessage = $"NTP 同步超时（{timeout.TotalSeconds}秒）";
+                    return result;
+                }
+
+                var code = await tcs.Task;
                 result.RawCode = code;
                 result.Status = MapNtpStatus(code);
                 return result;
             }
-
-            result.ErrorMessage = "未收到 +CNTP 返回行";
-            return result;
+            catch (Exception ex)
+            {
+                result.ErrorMessage = ex.Message;
+                return result;
+            }
+            finally
+            {
+                _channel.UnsolicitedReceived -= handler;
+            }
         }
 
         private static NtpSyncStatus MapNtpStatus(int code)

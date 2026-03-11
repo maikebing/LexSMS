@@ -751,8 +751,16 @@ namespace LexSMS
         #region TCP/IP 和 UDP 功能
 
         /// <summary>
+        /// 检查网络是否已打开（AT+NETOPEN?）
+        /// </summary>
+        /// <returns>true 表示网络已打开，false 表示未打开</returns>
+        public Task<bool> TcpIsNetworkOpenAsync()
+            => _tcpIpClient.IsNetworkOpenAsync();
+
+        /// <summary>
         /// 激活网络连接（AT+NETOPEN）
         /// 前提：GPRS 已附着（GetGprsAttachStatusAsync 返回 Attached）
+        /// 建议先调用 TcpIsNetworkOpenAsync() 检查网络状态，避免重复打开
         /// </summary>
         public Task<bool> TcpOpenNetworkAsync()
             => _tcpIpClient.OpenNetworkAsync();

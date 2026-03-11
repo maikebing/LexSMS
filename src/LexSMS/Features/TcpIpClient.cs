@@ -36,8 +36,44 @@ namespace LexSMS.Features
         }
 
         /// <summary>
+        /// 检查网络是否已打开（AT+NETOPEN?）
+        /// </summary>
+        /// <returns>true 表示网络已打开，false 表示未打开</returns>
+        public async Task<bool> IsNetworkOpenAsync()
+        {
+            try
+            {
+                var resp = await _channel.SendCommandAsync("AT+NETOPEN?", 5000);
+                if (!resp.IsOk)
+                    return false;
+
+                // 解析返回值，格式：+NETOPEN: <state>
+                // state: 0=未打开, 1=已打开
+                foreach (var line in resp.RawResponse.Split('\n'))
+                {
+                    var trimmed = line.Trim();
+                    if (trimmed.StartsWith("+NETOPEN:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var parts = trimmed.Substring(9).Trim().Split(',');
+                        if (parts.Length > 0 && int.TryParse(parts[0].Trim(), out int state))
+                        {
+                            return state == 1;
+                        }
+                    }
+                }
+                return false;
+            }
+            catch
+            {
+                // 查询失败时返回 false
+                return false;
+            }
+        }
+
+        /// <summary>
         /// 激活网络连接（AT+NETOPEN）
         /// 前提：GPRS 已附着（AT+CGATT? 返回 1）
+        /// 建议先调用 IsNetworkOpenAsync() 检查网络状态，避免重复打开
         /// </summary>
         /// <returns>成功返回 true</returns>
         public async Task<bool> OpenNetworkAsync()
