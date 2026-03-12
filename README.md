@@ -71,6 +71,8 @@ Console.WriteLine($"正在拨出: {callInfo.PhoneNumber}");
 await modem.HangUpAsync();
 ```
 
+完整的控制台通话菜单示例见 `samples/CallControlExample`，包含启动时检测 SIM/网络状态、启动时自动显示信号并周期刷新、来电高亮提示、自动接听、拨号、挂断、接听、拒接、显示来电、显示被叫号码、通话记录列表、本地文件持久化时间戳、查询通话状态和查询信号强度。
+
 ### 发送短信（支持中文）
 
 ```csharp

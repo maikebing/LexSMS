@@ -88,6 +88,57 @@ namespace LexSMS.Tests
 
             Assert.Null(response.FirstLine);
         }
+
+    public class CallManagerHelperTests
+    {
+        private static readonly MethodInfo s_isAnswerableState =
+            typeof(CallManager).GetMethod("IsAnswerableState",
+                BindingFlags.NonPublic | BindingFlags.Static)!;
+
+        private static readonly MethodInfo s_isTransientAnswerError =
+            typeof(CallManager).GetMethod("IsTransientAnswerError",
+                BindingFlags.NonPublic | BindingFlags.Static)!;
+
+        [Fact]
+        public void IsAnswerableState_ReturnsTrueForRinging()
+        {
+            var actual = (bool)s_isAnswerableState.Invoke(null, new object[] { CallState.Ringing })!;
+            Assert.True(actual);
+        }
+
+        [Fact]
+        public void IsAnswerableState_ReturnsFalseForActive()
+        {
+            var actual = (bool)s_isAnswerableState.Invoke(null, new object[] { CallState.Active })!;
+            Assert.False(actual);
+        }
+
+        [Fact]
+        public void IsTransientAnswerError_ReturnsTrueForUnknownCmeError()
+        {
+            var response = new AtResponse
+            {
+                IsError = true,
+                ErrorMessage = "+CME ERROR: unknown error"
+            };
+
+            var actual = (bool)s_isTransientAnswerError.Invoke(null, new object[] { response })!;
+            Assert.True(actual);
+        }
+
+        [Fact]
+        public void IsTransientAnswerError_ReturnsFalseForOtherCmeError()
+        {
+            var response = new AtResponse
+            {
+                IsError = true,
+                ErrorMessage = "+CME ERROR: operation not allowed"
+            };
+
+            var actual = (bool)s_isTransientAnswerError.Invoke(null, new object[] { response })!;
+            Assert.False(actual);
+        }
+    }
     }
 
     /// <summary>
@@ -275,6 +326,57 @@ namespace LexSMS.Tests
             }
 
             Assert.Equal(totalLength, totalReceived);
+        }
+    }
+
+    public class CallManagerHelperTests
+    {
+        private static readonly MethodInfo s_isAnswerableState =
+            typeof(CallManager).GetMethod("IsAnswerableState",
+                BindingFlags.NonPublic | BindingFlags.Static)!;
+
+        private static readonly MethodInfo s_isTransientAnswerError =
+            typeof(CallManager).GetMethod("IsTransientAnswerError",
+                BindingFlags.NonPublic | BindingFlags.Static)!;
+
+        [Fact]
+        public void IsAnswerableState_ReturnsTrueForRinging()
+        {
+            var actual = (bool)s_isAnswerableState.Invoke(null, new object[] { CallState.Ringing })!;
+            Assert.True(actual);
+        }
+
+        [Fact]
+        public void IsAnswerableState_ReturnsFalseForActive()
+        {
+            var actual = (bool)s_isAnswerableState.Invoke(null, new object[] { CallState.Active })!;
+            Assert.False(actual);
+        }
+
+        [Fact]
+        public void IsTransientAnswerError_ReturnsTrueForUnknownCmeError()
+        {
+            var response = new AtResponse
+            {
+                IsError = true,
+                ErrorMessage = "+CME ERROR: unknown error"
+            };
+
+            var actual = (bool)s_isTransientAnswerError.Invoke(null, new object[] { response })!;
+            Assert.True(actual);
+        }
+
+        [Fact]
+        public void IsTransientAnswerError_ReturnsFalseForOtherCmeError()
+        {
+            var response = new AtResponse
+            {
+                IsError = true,
+                ErrorMessage = "+CME ERROR: operation not allowed"
+            };
+
+            var actual = (bool)s_isTransientAnswerError.Invoke(null, new object[] { response })!;
+            Assert.False(actual);
         }
     }
 }

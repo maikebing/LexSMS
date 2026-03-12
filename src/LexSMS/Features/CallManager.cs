@@ -79,9 +79,32 @@ namespace LexSMS.Features
         /// </summary>
         public async Task AnswerAsync()
         {
-            var resp = await _channel.SendCommandAsync("ATA");
-            if (resp.IsError)
-                throw new AtCommandErrorException("ATA", resp.RawResponse);
+            const string answerCommand = "ATA";
+
+            if (!IsAnswerableState(_currentCall.State))
+            {
+                await GetCurrentCallAsync().ConfigureAwait(false);
+            }
+
+            if (!IsAnswerableState(_currentCall.State) || _currentCall.Direction != CallDirection.Incoming)
+                throw new InvalidOperationException("当前没有可接听的来电");
+
+            AtResponse? resp = null;
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                resp = await _channel.SendCommandAsync(answerCommand).ConfigureAwait(false);
+                if (!resp.IsError)
+                    break;
+
+                if (!IsTransientAnswerError(resp) || attempt == 2)
+                    throw new AtCommandErrorException(answerCommand, resp.RawResponse);
+
+                await Task.Delay((attempt + 1) * 300).ConfigureAwait(false);
+                await GetCurrentCallAsync().ConfigureAwait(false);
+
+                if (!IsAnswerableState(_currentCall.State) || _currentCall.Direction != CallDirection.Incoming)
+                    throw new InvalidOperationException("来电已结束，无法接听");
+            }
 
             _currentCall.State = CallState.Active;
             if (_currentCall.StartTime == null)
@@ -95,9 +118,7 @@ namespace LexSMS.Features
         /// </summary>
         public async Task HangUpAsync()
         {
-            var resp = await _channel.SendCommandAsync("ATH");
-            if (resp.IsError)
-                throw new AtCommandErrorException("ATH", resp.RawResponse);
+            await SendHangUpCommandAsync().ConfigureAwait(false);
 
             _currentCall.State = CallState.Disconnected;
             OnCallStateChanged(_currentCall);
@@ -109,10 +130,7 @@ namespace LexSMS.Features
         /// </summary>
         public async Task RejectAsync()
         {
-            // 使用AT+CHUP拒接，或ATH
-            var resp = await _channel.SendCommandAsync("AT+CHUP");
-            if (resp.IsError)
-                resp = await _channel.SendCommandAsync("ATH");
+            await SendHangUpCommandAsync().ConfigureAwait(false);
 
             _currentCall.State = CallState.Disconnected;
             OnCallStateChanged(_currentCall);
@@ -205,5 +223,24 @@ namespace LexSMS.Features
         {
             CallStateChanged?.Invoke(this, new CallStateChangedEventArgs(callInfo));
         }
+
+        private async Task SendHangUpCommandAsync()
+        {
+            var resp = await _channel.SendCommandAsync("AT+CHUP").ConfigureAwait(false);
+            if (!resp.IsError)
+                return;
+
+            resp = await _channel.SendCommandAsync("ATH").ConfigureAwait(false);
+            if (resp.IsError)
+                throw new AtCommandErrorException("ATH", resp.RawResponse);
+        }
+
+        private static bool IsAnswerableState(CallState state)
+            => state == CallState.Ringing || state == CallState.Waiting;
+
+        private static bool IsTransientAnswerError(AtResponse response)
+            => response.IsError &&
+               !string.IsNullOrWhiteSpace(response.ErrorMessage) &&
+               response.ErrorMessage.Contains("unknown error", StringComparison.OrdinalIgnoreCase);
     }
 }

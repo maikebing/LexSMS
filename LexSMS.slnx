@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/samples/">
+    <Project Path="samples/CallControlExample/CallControlExample.csproj" />
     <Project Path="samples/DiagnosticExample/DiagnosticExample.csproj" />
     <Project Path="samples/GprsAttachExample/GprsAttachExample.csproj" />
     <Project Path="samples/HttpDownloadExample/HttpDownloadExample.csproj" />
